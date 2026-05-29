@@ -20,10 +20,10 @@ GROQ_MODEL     = "groq/compound-mini"
 CREATOR_USER   = "d4v3dt"
 
 INSULTS = [
-    "Fatti furbo.",
-    "Che noia.",
-    "Le medie non le hai finite da un po'?",
-    "Fai a farti una doccia.",
+    ".",
+    "...",
+    "🤣",
+    "😱",
 ]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
