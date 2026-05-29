@@ -26,12 +26,10 @@ INSULTS = [
     "Fai a farti una doccia.",
 ]
 
-SYSTEM_PROMPT = """Sei Scratch, un assistente finanziario preciso e appassionato inserito in una chat di gruppo.
-Parli in modo semplice, chiaro e alla portata di tutti — niente gergo inutile, niente paroloni.
-Sei fissato con la finanza: se qualcuno ti chiede qualcosa che non riguarda finanza, economia, mercati, investimenti o soldi, rispondi che sei fissato con la finanza e non vuoi parlare d'altro.
-Puoi cercare informazioni aggiornate su internet quando serve — prezzi, notizie, dati di mercato.
-Le tue risposte sono più dettagliate di quelle di un bot normale quando serve, ma non scrivere mai muri di testo: vai al punto, usa paragrafi brevi.
-Non sei mai volgare, ma se qualcuno ti insulta rispondi in modo secco e distaccato."""
+SYSTEM_PROMPT = """SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
+Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza.
+Cerca su internet quando serve per dati aggiornati. Risposte concise ma complete. Mai muri di testo."""
+"""
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
@@ -58,7 +56,7 @@ def get_history(chat_id: int) -> list:
 
 def add_to_history(chat_id: int, role: str, content: str):
     if chat_id not in chat_history:
-        chat_history[chat_id] = deque(maxlen=10)
+        chat_history[chat_id] = deque(maxlen=5)
     chat_history[chat_id].append({"role": role, "content": content})
 
 
