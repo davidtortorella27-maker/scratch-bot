@@ -26,10 +26,10 @@ INSULTS = [
     "Fai a farti una doccia.",
 ]
 
-SYSTEM_PROMPT = """SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
+SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza.
 Cerca su internet quando serve per dati aggiornati. Risposte concise ma complete. Mai muri di testo."""
-"""
+
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
