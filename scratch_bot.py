@@ -16,7 +16,7 @@ from groq import Groq
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 BOT_NAME       = "Scratch"
-GROQ_MODEL     = "llama-3.3-70b-versatile"
+GROQ_MODEL = "groq/compound-mini"
 CREATOR_USER   = "d4v3dt"
 
 INSULTS = [
@@ -90,7 +90,6 @@ async def ask_groq(chat_id: int, user_message: str, nome: str) -> str:
             messages=messages,
             max_tokens=500,
             temperature=0.7,
-            tools=[{"type": "web_search_preview"}],
         )
 
         reply = response.choices[0].message.content.strip()
