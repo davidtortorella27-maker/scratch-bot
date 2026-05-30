@@ -147,7 +147,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     reply = await ask_groq(chat_id, testo, nome)
-    await message.reply_text(reply)
+    await message.reply_text(reply, parse_mode="Markdown")
+
 
 
 # ── Main ────────────────────────────────────────────────────────────────────────
