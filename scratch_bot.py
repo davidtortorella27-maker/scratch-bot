@@ -1,6 +1,4 @@
 import os
-import re
-import json
 import logging
 from collections import deque
 from telegram import Update
@@ -13,16 +11,17 @@ from telegram.ext import (
 )
 from groq import Groq
 from tavily import TavilyClient
+import yfinance as yf
 
 # ── Configurazione ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 TAVILY_API_KEY  = os.environ.get("TAVILY_API_KEY", "LA_TUA_API_KEY_TAVILY")
 BOT_NAME        = "Scratch"
-GROQ_MODEL      = "llama-3.3-70b-versatile"
+GROQ_MODEL      = "llama-3.3-70b-versatile"   # modello grande per le risposte
+MODEL_ROUTER    = "llama-3.1-8b-instant"      # modello leggero per classificare
 CREATOR_USER    = "d4v3dt"
 
-# Siti affidabili per notizie e macro
 NEWS_SITES = [
     "ilsole24ore.com", "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
     "cnbc.com", "marketwatch.com", "investing.com", "milanofinanza.it",
@@ -32,7 +31,7 @@ NEWS_SITES = [
 ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
-Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
+Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, di' che sei fissato con la finanza e non vuoi parlare d'altro.
 Formattazione: per spiegazioni e concetti usa paragrafi discorsivi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
 Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
@@ -43,11 +42,6 @@ Se i dati non contengono la risposta, dillo onestamente invece di inventare. Par
 FORMATTAZIONE ADATTIVA:
 - Quando presenti DATI, NUMERI, QUOTAZIONI, LISTE o CONFRONTI: usa una struttura ordinata con un titolo in grassetto e bullet point (usa il trattino - per i bullet). Ogni dato su una riga.
 - Quando spieghi un CONCETTO o racconti una NOTIZIA: usa paragrafi discorsivi e scorrevoli, niente bullet forzati.
-Esempio per una quotazione:
-**Apple (AAPL)**
-- Prezzo: 310 USD
-- Variazione: -0,6% rispetto a ieri
-- Intervallo giornaliero: 309,5 - 315,0 USD
 
 Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
@@ -56,8 +50,8 @@ ROUTER_PROMPT = """Classifica la seguente domanda di un utente in UNA di queste 
 Categorie:
 - AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico (es. "quanto quota Apple", "prezzo Eni")
 - ETF: qualsiasi cosa riguardi ETF — prezzo di un ETF, lista di ETF su un tema, confronti tra ETF (es. "quota questo ETF IE00...", "lista ETF rinnovabili")
-- NOTIZIA: chiede notizie, eventi, analisi di mercato, dati macroeconomici, crypto (es. "perché è sceso il mercato", "notizie su Bitcoin")
-- CONCETTO: domanda teorica o di spiegazione che non richiede dati aggiornati (es. "cos'è un ETF", "come funziona un'obbligazione")
+- NOTIZIA: chiede notizie, eventi, analisi di mercato, dati macroeconomici, crypto (es. "perche e sceso il mercato", "notizie su Bitcoin")
+- CONCETTO: domanda teorica o di spiegazione che non richiede dati aggiornati (es. "cos'e un ETF", "come funziona un'obbligazione")
 
 Domanda: {domanda}
 
@@ -97,7 +91,7 @@ def add_to_history(chat_id: int, role: str, content: str):
 def classifica_domanda(domanda: str) -> str:
     try:
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=MODEL_ROUTER,
             messages=[{"role": "user", "content": ROUTER_PROMPT.format(domanda=domanda)}],
             max_tokens=10,
             temperature=0.0,
@@ -113,38 +107,37 @@ def classifica_domanda(domanda: str) -> str:
 
 
 def get_prezzo_azione(query: str) -> str:
-    """Cerca il prezzo di un'azione via Yahoo Finance (URL diretto)."""
-    import urllib.request
+    """Cerca il prezzo di un'azione via yfinance."""
     try:
-        # Prima trova il simbolo dal nome
-        search_url = f"https://query1.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}"
-        req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        quotes = data.get("quotes", [])
+        ricerca = yf.Search(query, max_results=5)
+        quotes = ricerca.quotes
         if not quotes:
+            logger.info(f"Yahoo: nessun simbolo per '{query}'")
             return "NESSUN_DATO"
         symbol = quotes[0].get("symbol")
-        nome = quotes[0].get("shortname", symbol)
+        nome = quotes[0].get("shortname") or quotes[0].get("longname") or symbol
+        if not symbol:
+            return "NESSUN_DATO"
 
-        # Poi prendi il prezzo
-        chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        req2 = urllib.request.Request(chart_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req2, timeout=10) as resp:
-            chart = json.loads(resp.read())
-        result = chart["chart"]["result"][0]
-        meta = result["meta"]
-        prezzo = meta.get("regularMarketPrice")
-        valuta = meta.get("currency", "")
-        prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-        high = meta.get("regularMarketDayHigh")
-        low = meta.get("regularMarketDayLow")
-        righe = [f"Titolo: {nome} ({symbol})", f"Prezzo: {prezzo} {valuta}"]
+        ticker = yf.Ticker(symbol)
+        info = ticker.fast_info
+        prezzo = info.get("lastPrice") or info.get("last_price")
+        valuta = info.get("currency", "")
+        prev = info.get("previousClose") or info.get("previous_close")
+        high = info.get("dayHigh") or info.get("day_high")
+        low = info.get("dayLow") or info.get("day_low")
+
+        if not prezzo:
+            logger.info(f"Yahoo: nessun prezzo per {symbol}")
+            return "NESSUN_DATO"
+
+        logger.info(f"Yahoo OK: {symbol} = {prezzo} {valuta}")
+        righe = [f"Titolo: {nome} ({symbol})", f"Prezzo: {round(prezzo, 2)} {valuta}"]
         if prezzo and prev:
             pct = ((prezzo - prev) / prev) * 100
             righe.append(f"Variazione: {pct:+.2f}% rispetto alla chiusura precedente")
         if high and low:
-            righe.append(f"Intervallo giornaliero: {low} - {high} {valuta}")
+            righe.append(f"Intervallo giornaliero: {round(low, 2)} - {round(high, 2)} {valuta}")
         return "\n".join(righe)
     except Exception as e:
         logger.error(f"Errore Yahoo: {e}")
@@ -213,7 +206,7 @@ async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str
 async def cmd_sveglia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     bot_awake[chat_id] = True
-    await update.message.reply_text("Scratch è operativo. Parliamo di finanza.")
+    await update.message.reply_text("Scratch e operativo. Parliamo di finanza.")
 
 
 async def cmd_dormi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,19 +247,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if categoria == "AZIONE":
         dato = get_prezzo_azione(testo)
         if dato in ("NESSUN_DATO", "ERRORE_DATI"):
-            # ripiego: prova come ricerca notizie
             context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
         else:
             context_data = dato
-
     elif categoria == "ETF":
         n = 5 if is_lista(testo) else 3
         context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
-
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
-
-    # CONCETTO: nessuna ricerca, context_data resta None
 
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
@@ -281,7 +269,7 @@ def main() -> None:
     app.add_handler(CommandHandler("sveglia", cmd_sveglia))
     app.add_handler(CommandHandler("dormi",   cmd_dormi))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Scratch è online.")
+    logger.info("Scratch e online.")
     app.run_polling()
 
 
