@@ -15,16 +15,12 @@ from groq import Groq
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 BOT_NAME        = "Scratch"
-MODEL_NORMAL    = "llama-3.3-70b-versatile"
-MODEL_WEB       = "compound-beta"
+GROQ_MODEL      = "compound-beta"
 CREATOR_USER    = "d4v3dt"
-WEB_KEYWORDS    = ["internet", "web", "online"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
-Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
-
-SYSTEM_PROMPT_WEB = "Sei Scratch, assistente finanziario. Rispondi solo su finanza e mercati. Testo semplice, niente tabelle."
+Cerca su internet quando serve per dati aggiornati. Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
@@ -51,45 +47,31 @@ def get_history(chat_id: int) -> list:
 
 def add_to_history(chat_id: int, role: str, content: str):
     if chat_id not in chat_history:
-        chat_history[chat_id] = deque(maxlen=5)
+        chat_history[chat_id] = deque(maxlen=3)
     chat_history[chat_id].append({"role": role, "content": content})
 
 
-def needs_web(testo: str) -> bool:
-    return any(kw in testo.lower() for kw in WEB_KEYWORDS)
-
-
-def clean_keywords(testo: str) -> str:
-    # Rimuove le parole chiave web dal testo prima di mandarlo al modello
-    parole = testo.split()
-    parole_pulite = [p for p in parole if p.lower() not in WEB_KEYWORDS]
-    return " ".join(parole_pulite).strip()
-
-
-async def ask_groq(chat_id: int, user_message: str, nome: str, use_web: bool) -> str:
-    model = MODEL_WEB if use_web else MODEL_NORMAL
-    system = SYSTEM_PROMPT_WEB if use_web else SYSTEM_PROMPT
-    history = [] if use_web else get_history(chat_id)
+async def ask_groq(chat_id: int, user_message: str, nome: str) -> str:
     try:
-        messages = [{"role": "system", "content": system}]
+        history = get_history(chat_id)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
         messages.append({"role": "user", "content": f"[Messaggio di {nome}]: {user_message}"})
 
         response = groq_client.chat.completions.create(
-            model=model,
+            model=GROQ_MODEL,
             messages=messages,
             max_tokens=500,
             temperature=0.7,
         )
         reply = response.choices[0].message.content.strip()
 
-        if not use_web:
-            add_to_history(chat_id, "user", f"[Messaggio di {nome}]: {user_message}")
-            add_to_history(chat_id, "assistant", reply)
+        add_to_history(chat_id, "user", f"[Messaggio di {nome}]: {user_message}")
+        add_to_history(chat_id, "assistant", reply)
 
         return reply
     except Exception as e:
-        logger.error(f"Errore Groq ({model}): {e}")
+        logger.error(f"Errore Groq: {e}")
         return "Ho un problema tecnico. Riprova tra poco."
 
 
@@ -132,11 +114,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
 
-    use_web = needs_web(testo)
-    # Rimuove le parole chiave web prima di passare il testo al modello
-    testo_pulito = clean_keywords(testo) if use_web else testo
-
-    reply = await ask_groq(chat_id, testo_pulito, nome, use_web)
+    reply = await ask_groq(chat_id, testo, nome)
     await message.reply_text(reply, parse_mode="Markdown")
 
 
