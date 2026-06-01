@@ -53,7 +53,7 @@ def get_history(chat_id: int, web: bool = False) -> list:
 def add_to_history(chat_id: int, role: str, content: str, web: bool = False):
     key = f"{chat_id}_web" if web else chat_id
     if key not in chat_history:
-        chat_history[key] = deque(maxlen=1 if web else 5)
+        chat_history[key] = deque(maxlen=0 if web else 5)
     chat_history[key].append({"role": role, "content": content})
 
 
