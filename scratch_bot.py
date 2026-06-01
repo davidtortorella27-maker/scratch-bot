@@ -33,11 +33,22 @@ ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
+Formattazione: per spiegazioni e concetti usa paragrafi discorsivi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
 Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
 SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti dati o risultati di ricerca.
 Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
 Se i dati non contengono la risposta, dillo onestamente invece di inventare. Parli solo di finanza.
+
+FORMATTAZIONE ADATTIVA:
+- Quando presenti DATI, NUMERI, QUOTAZIONI, LISTE o CONFRONTI: usa una struttura ordinata con un titolo in grassetto e bullet point (usa il trattino - per i bullet). Ogni dato su una riga.
+- Quando spieghi un CONCETTO o racconti una NOTIZIA: usa paragrafi discorsivi e scorrevoli, niente bullet forzati.
+Esempio per una quotazione:
+**Apple (AAPL)**
+- Prezzo: 310 USD
+- Variazione: -0,6% rispetto a ieri
+- Intervallo giornaliero: 309,5 - 315,0 USD
+
 Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
 ROUTER_PROMPT = """Classifica la seguente domanda di un utente in UNA di queste categorie. Rispondi SOLO con la parola della categoria, niente altro.
@@ -126,11 +137,15 @@ def get_prezzo_azione(query: str) -> str:
         prezzo = meta.get("regularMarketPrice")
         valuta = meta.get("currency", "")
         prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-        var = ""
+        high = meta.get("regularMarketDayHigh")
+        low = meta.get("regularMarketDayLow")
+        righe = [f"Titolo: {nome} ({symbol})", f"Prezzo: {prezzo} {valuta}"]
         if prezzo and prev:
             pct = ((prezzo - prev) / prev) * 100
-            var = f" ({pct:+.2f}% rispetto a ieri)"
-        return f"{nome} ({symbol}): {prezzo} {valuta}{var}"
+            righe.append(f"Variazione: {pct:+.2f}% rispetto alla chiusura precedente")
+        if high and low:
+            righe.append(f"Intervallo giornaliero: {low} - {high} {valuta}")
+        return "\n".join(righe)
     except Exception as e:
         logger.error(f"Errore Yahoo: {e}")
         return "ERRORE_DATI"
