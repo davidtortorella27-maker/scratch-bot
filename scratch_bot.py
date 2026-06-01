@@ -50,8 +50,9 @@ def is_awake(chat_id: int) -> bool:
     return bot_awake.get(chat_id, False)
 
 
-def get_history(chat_id: int) -> list:
-    return list(chat_history.get(chat_id, deque()))
+def get_history(chat_id: int, limit: int = 5) -> list:
+    h = list(chat_history.get(chat_id, deque()))
+    return h[-limit:]
 
 
 def add_to_history(chat_id: int, role: str, content: str):
@@ -71,7 +72,6 @@ def clean_keywords(testo: str) -> str:
 
 
 def cerca_web(query: str) -> str:
-    """Cerca su Tavily e restituisce testo pulito e breve."""
     try:
         risultato = tavily_client.search(
             query=query,
@@ -80,13 +80,11 @@ def cerca_web(query: str) -> str:
             include_answer=True,
         )
         parti = []
-        # La risposta sintetica di Tavily
         if risultato.get("answer"):
             parti.append(f"Sintesi: {risultato['answer']}")
-        # Gli estratti dei primi risultati
         for r in risultato.get("results", [])[:3]:
             titolo = r.get("title", "")
-            contenuto = r.get("content", "")[:400]  # max 400 caratteri per risultato
+            contenuto = r.get("content", "")[:400]
             parti.append(f"- {titolo}: {contenuto}")
         return "\n".join(parti) if parti else "Nessun risultato trovato."
     except Exception as e:
@@ -98,11 +96,11 @@ async def ask_groq(chat_id: int, user_message: str, nome: str, web_context: str 
     try:
         if web_context:
             system = SYSTEM_PROMPT_WEB
-            history = []
+            history = get_history(chat_id, limit=3)  # memoria corta in modalità web
             user_content = f"Domanda di {nome}: {user_message}\n\nRisultati dal web:\n{web_context}"
         else:
             system = SYSTEM_PROMPT
-            history = get_history(chat_id)
+            history = get_history(chat_id, limit=5)  # memoria piena in modalità normale
             user_content = f"[Messaggio di {nome}]: {user_message}"
 
         messages = [{"role": "system", "content": system}]
@@ -117,9 +115,9 @@ async def ask_groq(chat_id: int, user_message: str, nome: str, web_context: str 
         )
         reply = response.choices[0].message.content.strip()
 
-        if not web_context:
-            add_to_history(chat_id, "user", user_content)
-            add_to_history(chat_id, "assistant", reply)
+        # Salva sempre in memoria (sia normale che web)
+        add_to_history(chat_id, "user", f"[{nome}]: {user_message}")
+        add_to_history(chat_id, "assistant", reply)
 
         return reply
     except Exception as e:
@@ -167,7 +165,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if needs_web(testo):
-        # Modalità web: cerca con Tavily, poi rielabora con llama
         query = clean_keywords(testo)
         web_context = cerca_web(query)
         if web_context == "ERRORE_RICERCA":
@@ -175,7 +172,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         reply = await ask_groq(chat_id, query, nome, web_context=web_context)
     else:
-        # Modalità normale
         reply = await ask_groq(chat_id, testo, nome)
 
     await message.reply_text(reply, parse_mode="Markdown")
