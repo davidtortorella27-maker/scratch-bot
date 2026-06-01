@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from collections import deque
 from telegram import Update
@@ -19,7 +20,7 @@ GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 TAVILY_API_KEY  = os.environ.get("TAVILY_API_KEY", "LA_TUA_API_KEY_TAVILY")
 BOT_NAME        = "Scratch"
 GROQ_MODEL      = "llama-3.3-70b-versatile"   # modello grande per le risposte
-MODEL_ROUTER    = "llama-3.1-8b-instant"      # modello leggero per classificare
+MODEL_ROUTER    = "llama-3.1-8b-instant"      # modello leggero per classificare/estrarre
 CREATOR_USER    = "d4v3dt"
 
 NEWS_SITES = [
@@ -32,30 +33,40 @@ ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, di' che sei fissato con la finanza e non vuoi parlare d'altro.
-Formattazione: per spiegazioni e concetti usa paragrafi discorsivi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
-Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+Formattazione: per spiegazioni e concetti usa paragrafi discorsivi brevi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
+IMPORTANTE: risposte brevi, massimo 5-6 righe. Mai muri di testo. Non usare mai il carattere | nelle risposte."""
 
 SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti dati o risultati di ricerca.
 Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
 Se i dati non contengono la risposta, dillo onestamente invece di inventare. Parli solo di finanza.
 
 FORMATTAZIONE ADATTIVA:
-- Quando presenti DATI, NUMERI, QUOTAZIONI, LISTE o CONFRONTI: usa una struttura ordinata con un titolo in grassetto e bullet point (usa il trattino - per i bullet). Ogni dato su una riga.
-- Quando spieghi un CONCETTO o racconti una NOTIZIA: usa paragrafi discorsivi e scorrevoli, niente bullet forzati.
+- Per DATI, NUMERI, QUOTAZIONI, LISTE o CONFRONTI: titolo in grassetto e bullet point col trattino, ogni dato su una riga.
+- Per CONCETTI o NOTIZIE: paragrafi discorsivi brevi, niente bullet forzati.
 
-Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+IMPORTANTE: risposte brevi, massimo 5-6 righe. Mai muri di testo. Non usare mai il carattere | nelle risposte."""
 
-ROUTER_PROMPT = """Classifica la seguente domanda di un utente in UNA di queste categorie. Rispondi SOLO con la parola della categoria, niente altro.
+ROUTER_PROMPT = """Analizza la domanda di un utente in una chat di finanza. Rispondi SOLO con un oggetto JSON valido, niente altro.
+
+Il JSON deve avere due campi:
+- "categoria": una tra AZIONE, ETF, NOTIZIA, CONCETTO
+- "titolo": se categoria e AZIONE, il solo nome dell'azienda o titolo (es. "Microsoft", "Apple", "Eni"); altrimenti stringa vuota ""
 
 Categorie:
-- AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico (es. "quanto quota Apple", "prezzo Eni")
-- ETF: qualsiasi cosa riguardi ETF — prezzo di un ETF, lista di ETF su un tema, confronti tra ETF (es. "quota questo ETF IE00...", "lista ETF rinnovabili")
-- NOTIZIA: chiede notizie, eventi, analisi di mercato, dati macroeconomici, crypto (es. "perche e sceso il mercato", "notizie su Bitcoin")
-- CONCETTO: domanda teorica o di spiegazione che non richiede dati aggiornati (es. "cos'e un ETF", "come funziona un'obbligazione")
+- AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico
+- ETF: qualsiasi cosa riguardi ETF (prezzo, lista tematica, confronti)
+- NOTIZIA: notizie, eventi, analisi di mercato, dati macro, crypto
+- CONCETTO: domanda teorica che non richiede dati aggiornati
 
-Domanda: {domanda}
+Esempi:
+Domanda: "Scratch quanto quota Microsoft?" -> {{"categoria": "AZIONE", "titolo": "Microsoft"}}
+Domanda: "lista ETF rinnovabili" -> {{"categoria": "ETF", "titolo": ""}}
+Domanda: "perche sale il bitcoin" -> {{"categoria": "NOTIZIA", "titolo": ""}}
+Domanda: "cos'e un dividendo" -> {{"categoria": "CONCETTO", "titolo": ""}}
 
-Categoria:"""
+Domanda: "{domanda}"
+
+JSON:"""
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
@@ -88,31 +99,36 @@ def add_to_history(chat_id: int, role: str, content: str):
     chat_history[chat_id].append({"role": role, "content": content})
 
 
-def classifica_domanda(domanda: str) -> str:
+def classifica_ed_estrai(domanda: str) -> tuple:
+    """Ritorna (categoria, titolo). Una sola chiamata al modello leggero."""
     try:
         response = groq_client.chat.completions.create(
             model=MODEL_ROUTER,
             messages=[{"role": "user", "content": ROUTER_PROMPT.format(domanda=domanda)}],
-            max_tokens=10,
+            max_tokens=50,
             temperature=0.0,
         )
-        cat = response.choices[0].message.content.strip().upper()
-        for c in ["AZIONE", "ETF", "NOTIZIA", "CONCETTO"]:
-            if c in cat:
-                return c
-        return "CONCETTO"
+        raw = response.choices[0].message.content.strip()
+        # pulisce eventuali backtick
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw)
+        cat = data.get("categoria", "CONCETTO").upper()
+        titolo = data.get("titolo", "").strip()
+        if cat not in ("AZIONE", "ETF", "NOTIZIA", "CONCETTO"):
+            cat = "CONCETTO"
+        return cat, titolo
     except Exception as e:
         logger.error(f"Errore router: {e}")
-        return "CONCETTO"
+        return "CONCETTO", ""
 
 
-def get_prezzo_azione(query: str) -> str:
-    """Cerca il prezzo di un'azione via yfinance."""
+def get_prezzo_azione(titolo: str) -> str:
+    """Cerca il prezzo di un'azione via yfinance, partendo dal nome pulito."""
     try:
-        ricerca = yf.Search(query, max_results=5)
+        ricerca = yf.Search(titolo, max_results=5)
         quotes = ricerca.quotes
         if not quotes:
-            logger.info(f"Yahoo: nessun simbolo per '{query}'")
+            logger.info(f"Yahoo: nessun simbolo per '{titolo}'")
             return "NESSUN_DATO"
         symbol = quotes[0].get("symbol")
         nome = quotes[0].get("shortname") or quotes[0].get("longname") or symbol
@@ -189,7 +205,7 @@ async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            max_tokens=600,
+            max_tokens=400,
             temperature=0.7,
         )
         reply = response.choices[0].message.content.strip()
@@ -239,13 +255,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
 
-    categoria = classifica_domanda(testo)
-    logger.info(f"Categoria: {categoria} | Domanda: {testo[:50]}")
+    categoria, titolo = classifica_ed_estrai(testo)
+    logger.info(f"Categoria: {categoria} | Titolo: '{titolo}' | Domanda: {testo[:50]}")
 
     context_data = None
 
     if categoria == "AZIONE":
-        dato = get_prezzo_azione(testo)
+        nome_titolo = titolo if titolo else testo
+        dato = get_prezzo_azione(nome_titolo)
         if dato in ("NESSUN_DATO", "ERRORE_DATI"):
             context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
         else:
