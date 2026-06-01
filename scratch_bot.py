@@ -18,7 +18,7 @@ BOT_NAME        = "Scratch"
 MODEL_NORMAL    = "llama-3.3-70b-versatile"
 MODEL_WEB       = "compound-beta"
 CREATOR_USER    = "d4v3dt"
-WEB_KEYWORDS    = {"internet", "web", "online"}
+WEB_KEYWORDS    = ["internet", "web", "online"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
@@ -57,6 +57,13 @@ def add_to_history(chat_id: int, role: str, content: str):
 
 def needs_web(testo: str) -> bool:
     return any(kw in testo.lower() for kw in WEB_KEYWORDS)
+
+
+def clean_keywords(testo: str) -> str:
+    # Rimuove le parole chiave web dal testo prima di mandarlo al modello
+    parole = testo.split()
+    parole_pulite = [p for p in parole if p.lower() not in WEB_KEYWORDS]
+    return " ".join(parole_pulite).strip()
 
 
 async def ask_groq(chat_id: int, user_message: str, nome: str, use_web: bool) -> str:
@@ -126,7 +133,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     use_web = needs_web(testo)
-    reply = await ask_groq(chat_id, testo, nome, use_web)
+    # Rimuove le parole chiave web prima di passare il testo al modello
+    testo_pulito = clean_keywords(testo) if use_web else testo
+
+    reply = await ask_groq(chat_id, testo_pulito, nome, use_web)
     await message.reply_text(reply, parse_mode="Markdown")
 
 
