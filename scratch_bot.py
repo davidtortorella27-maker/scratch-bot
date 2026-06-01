@@ -34,19 +34,20 @@ NEWS_SITES = [
 ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
-Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, di' che sei fissato con la finanza e non vuoi parlare d'altro.
-Formattazione: per spiegazioni e concetti usa paragrafi discorsivi brevi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
-IMPORTANTE: risposte brevi, massimo 5-6 righe. Mai muri di testo. Non usare mai il carattere | nelle risposte."""
+Tratti solo argomenti di finanza, economia, mercati e investimenti. Se qualcuno ti fa una domanda completamente fuori tema (non finanziaria), allora rispondi che sei fissato con la finanza e non parli d'altro. Ma se la domanda E gia di finanza, rispondi e basta, senza mai precisare di cosa non parli.
+Formattazione: per spiegazioni e concetti usa paragrafi discorsivi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
+Non usare mai il carattere | nelle risposte."""
 
 SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti dati o risultati di ricerca.
 Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
-Se i dati non contengono la risposta, dillo onestamente invece di inventare. Parli solo di finanza.
+Se i dati non contengono la risposta, dillo onestamente invece di inventare. Non commentare mai su argomenti che non tratti: rispondi solo a cio che ti viene chiesto.
 
 FORMATTAZIONE ADATTIVA:
-- Per DATI, NUMERI, QUOTAZIONI, LISTE o CONFRONTI: titolo in grassetto e bullet point col trattino, ogni dato su una riga.
-- Per CONCETTI o NOTIZIE: paragrafi discorsivi brevi, niente bullet forzati.
+- Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca.
+- Per LISTE DI ETF: per ogni ETF riporta il nome completo e, se presente nei dati, il codice ISIN. Usa bullet col trattino.
+- Per NOTIZIE, ANALISI MACROECONOMICHE e SPIEGAZIONI: usa paragrafi discorsivi, puoi essere piu ampio e articolato per spiegare bene.
 
-IMPORTANTE: risposte brevi, massimo 5-6 righe. Mai muri di testo. Non usare mai il carattere | nelle risposte."""
+Non usare mai il carattere | nelle risposte."""
 
 ROUTER_PROMPT = """Analizza la domanda di un utente in una chat di finanza. Rispondi SOLO con un oggetto JSON valido, niente altro.
 
@@ -203,7 +204,7 @@ def is_lista(testo: str) -> bool:
     return any(p in testo.lower() for p in parole)
 
 
-async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None) -> str:
+async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None, lungo: bool = False) -> str:
     try:
         if context_data:
             system = SYSTEM_PROMPT_DATA
@@ -218,10 +219,11 @@ async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str
         messages.extend(history)
         messages.append({"role": "user", "content": user_content})
 
+        max_tok = 700 if lungo else 350
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            max_tokens=400,
+            max_tokens=max_tok,
             temperature=0.7,
         )
         reply = response.choices[0].message.content.strip()
@@ -292,7 +294,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
 
-    reply = await rispondi(chat_id, testo, nome, context_data=context_data)
+    # Risposte piu lunghe per concetti, notizie/macro ed ETF; corte per le quotazioni
+    lungo = categoria in ("ETF", "NOTIZIA", "CONCETTO")
+    reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=lungo)
     await message.reply_text(reply, parse_mode="Markdown")
 
 
