@@ -16,7 +16,7 @@ TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 BOT_NAME        = "Scratch"
 MODEL_NORMAL    = "llama-3.3-70b-versatile"
-MODEL_WEB       = "groq/compound-mini"
+MODEL_WEB       = "groq/compound"
 CREATOR_USER    = "d4v3dt"
 WEB_KEYWORDS    = {"internet", "web", "online"}
 
