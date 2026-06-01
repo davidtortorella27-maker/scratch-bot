@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import urllib.request
+import urllib.parse
 from collections import deque
 from telegram import Update
 from telegram.ext import (
@@ -12,15 +14,15 @@ from telegram.ext import (
 )
 from groq import Groq
 from tavily import TavilyClient
-import yfinance as yf
 
 # ── Configurazione ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
 TAVILY_API_KEY  = os.environ.get("TAVILY_API_KEY", "LA_TUA_API_KEY_TAVILY")
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "LA_TUA_API_KEY_FINNHUB")
 BOT_NAME        = "Scratch"
-GROQ_MODEL      = "llama-3.3-70b-versatile"   # modello grande per le risposte
-MODEL_ROUTER    = "llama-3.1-8b-instant"      # modello leggero per classificare/estrarre
+GROQ_MODEL      = "llama-3.3-70b-versatile"
+MODEL_ROUTER    = "llama-3.1-8b-instant"
 CREATOR_USER    = "d4v3dt"
 
 NEWS_SITES = [
@@ -100,7 +102,6 @@ def add_to_history(chat_id: int, role: str, content: str):
 
 
 def classifica_ed_estrai(domanda: str) -> tuple:
-    """Ritorna (categoria, titolo). Una sola chiamata al modello leggero."""
     try:
         response = groq_client.chat.completions.create(
             model=MODEL_ROUTER,
@@ -109,7 +110,6 @@ def classifica_ed_estrai(domanda: str) -> tuple:
             temperature=0.0,
         )
         raw = response.choices[0].message.content.strip()
-        # pulisce eventuali backtick
         raw = raw.replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
         cat = data.get("categoria", "CONCETTO").upper()
@@ -122,41 +122,57 @@ def classifica_ed_estrai(domanda: str) -> tuple:
         return "CONCETTO", ""
 
 
-def get_prezzo_azione(titolo: str) -> str:
-    """Cerca il prezzo di un'azione via yfinance, partendo dal nome pulito."""
-    try:
-        ricerca = yf.Search(titolo, max_results=5)
-        quotes = ricerca.quotes
-        if not quotes:
-            logger.info(f"Yahoo: nessun simbolo per '{titolo}'")
-            return "NESSUN_DATO"
-        symbol = quotes[0].get("symbol")
-        nome = quotes[0].get("shortname") or quotes[0].get("longname") or symbol
-        if not symbol:
-            return "NESSUN_DATO"
+def _http_get_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
 
-        ticker = yf.Ticker(symbol)
-        info = ticker.fast_info
-        prezzo = info.get("lastPrice") or info.get("last_price")
-        valuta = info.get("currency", "")
-        prev = info.get("previousClose") or info.get("previous_close")
-        high = info.get("dayHigh") or info.get("day_high")
-        low = info.get("dayLow") or info.get("day_low")
+
+def get_prezzo_azione(titolo: str) -> str:
+    """Cerca il prezzo via Finnhub: prima trova il simbolo, poi la quotazione."""
+    try:
+        # 1) Trova il simbolo dal nome
+        q = urllib.parse.quote(titolo)
+        lookup = _http_get_json(
+            f"https://finnhub.io/api/v1/search?q={q}&token={FINNHUB_API_KEY}"
+        )
+        risultati = lookup.get("result", [])
+        if not risultati:
+            logger.info(f"Finnhub: nessun simbolo per '{titolo}'")
+            return "NESSUN_DATO"
+        # preferisce simboli senza punto (azioni USA pure) se presenti
+        symbol = risultati[0].get("symbol")
+        descr = risultati[0].get("description", symbol)
+        for r in risultati:
+            s = r.get("symbol", "")
+            if "." not in s:
+                symbol = s
+                descr = r.get("description", s)
+                break
+
+        # 2) Prendi la quotazione
+        quote = _http_get_json(
+            f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
+        )
+        prezzo = quote.get("c")   # current price
+        prev = quote.get("pc")    # previous close
+        high = quote.get("h")     # day high
+        low = quote.get("l")      # day low
 
         if not prezzo:
-            logger.info(f"Yahoo: nessun prezzo per {symbol}")
+            logger.info(f"Finnhub: nessun prezzo per {symbol}")
             return "NESSUN_DATO"
 
-        logger.info(f"Yahoo OK: {symbol} = {prezzo} {valuta}")
-        righe = [f"Titolo: {nome} ({symbol})", f"Prezzo: {round(prezzo, 2)} {valuta}"]
+        logger.info(f"Finnhub OK: {symbol} = {prezzo}")
+        righe = [f"Titolo: {descr} ({symbol})", f"Prezzo: {round(prezzo, 2)} USD"]
         if prezzo and prev:
             pct = ((prezzo - prev) / prev) * 100
             righe.append(f"Variazione: {pct:+.2f}% rispetto alla chiusura precedente")
         if high and low:
-            righe.append(f"Intervallo giornaliero: {round(low, 2)} - {round(high, 2)} {valuta}")
+            righe.append(f"Intervallo giornaliero: {round(low, 2)} - {round(high, 2)} USD")
         return "\n".join(righe)
     except Exception as e:
-        logger.error(f"Errore Yahoo: {e}")
+        logger.error(f"Errore Finnhub: {e}")
         return "ERRORE_DATI"
 
 
