@@ -10,17 +10,25 @@ from telegram.ext import (
     filters,
 )
 from groq import Groq
+from tavily import TavilyClient
 
 # ── Configurazione ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "IL_TUO_TOKEN_TELEGRAM")
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY",   "LA_TUA_API_KEY_GROQ")
+TAVILY_API_KEY  = os.environ.get("TAVILY_API_KEY", "LA_TUA_API_KEY_TAVILY")
 BOT_NAME        = "Scratch"
-GROQ_MODEL      = "compound-beta"
+GROQ_MODEL      = "llama-3.3-70b-versatile"
 CREATOR_USER    = "d4v3dt"
+WEB_KEYWORDS    = ["internet", "web", "online"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
-Cerca su internet quando serve per dati aggiornati. Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+
+SYSTEM_PROMPT_WEB = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
+Ti vengono forniti dei risultati di ricerca dal web. Usali per rispondere alla domanda con dati aggiornati.
+Non elencare i risultati grezzi: rielaborali in una risposta naturale e scorrevole con il tuo stile.
+Parli solo di finanza. Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
@@ -34,6 +42,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -47,16 +56,58 @@ def get_history(chat_id: int) -> list:
 
 def add_to_history(chat_id: int, role: str, content: str):
     if chat_id not in chat_history:
-        chat_history[chat_id] = deque(maxlen=3)
+        chat_history[chat_id] = deque(maxlen=5)
     chat_history[chat_id].append({"role": role, "content": content})
 
 
-async def ask_groq(chat_id: int, user_message: str, nome: str) -> str:
+def needs_web(testo: str) -> bool:
+    return any(kw in testo.lower() for kw in WEB_KEYWORDS)
+
+
+def clean_keywords(testo: str) -> str:
+    parole = testo.split()
+    parole_pulite = [p for p in parole if p.lower() not in WEB_KEYWORDS]
+    return " ".join(parole_pulite).strip()
+
+
+def cerca_web(query: str) -> str:
+    """Cerca su Tavily e restituisce testo pulito e breve."""
     try:
-        history = get_history(chat_id)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        risultato = tavily_client.search(
+            query=query,
+            search_depth="basic",
+            max_results=3,
+            include_answer=True,
+        )
+        parti = []
+        # La risposta sintetica di Tavily
+        if risultato.get("answer"):
+            parti.append(f"Sintesi: {risultato['answer']}")
+        # Gli estratti dei primi risultati
+        for r in risultato.get("results", [])[:3]:
+            titolo = r.get("title", "")
+            contenuto = r.get("content", "")[:400]  # max 400 caratteri per risultato
+            parti.append(f"- {titolo}: {contenuto}")
+        return "\n".join(parti) if parti else "Nessun risultato trovato."
+    except Exception as e:
+        logger.error(f"Errore Tavily: {e}")
+        return "ERRORE_RICERCA"
+
+
+async def ask_groq(chat_id: int, user_message: str, nome: str, web_context: str = None) -> str:
+    try:
+        if web_context:
+            system = SYSTEM_PROMPT_WEB
+            history = []
+            user_content = f"Domanda di {nome}: {user_message}\n\nRisultati dal web:\n{web_context}"
+        else:
+            system = SYSTEM_PROMPT
+            history = get_history(chat_id)
+            user_content = f"[Messaggio di {nome}]: {user_message}"
+
+        messages = [{"role": "system", "content": system}]
         messages.extend(history)
-        messages.append({"role": "user", "content": f"[Messaggio di {nome}]: {user_message}"})
+        messages.append({"role": "user", "content": user_content})
 
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -66,8 +117,9 @@ async def ask_groq(chat_id: int, user_message: str, nome: str) -> str:
         )
         reply = response.choices[0].message.content.strip()
 
-        add_to_history(chat_id, "user", f"[Messaggio di {nome}]: {user_message}")
-        add_to_history(chat_id, "assistant", reply)
+        if not web_context:
+            add_to_history(chat_id, "user", user_content)
+            add_to_history(chat_id, "assistant", reply)
 
         return reply
     except Exception as e:
@@ -114,7 +166,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
 
-    reply = await ask_groq(chat_id, testo, nome)
+    if needs_web(testo):
+        # Modalità web: cerca con Tavily, poi rielabora con llama
+        query = clean_keywords(testo)
+        web_context = cerca_web(query)
+        if web_context == "ERRORE_RICERCA":
+            await message.reply_text("Non riesco a cercare ora. Riprova tra poco.")
+            return
+        reply = await ask_groq(chat_id, query, nome, web_context=web_context)
+    else:
+        # Modalità normale
+        reply = await ask_groq(chat_id, testo, nome)
+
     await message.reply_text(reply, parse_mode="Markdown")
 
 
