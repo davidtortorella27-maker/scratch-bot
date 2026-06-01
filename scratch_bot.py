@@ -1,4 +1,6 @@
 import os
+import re
+import json
 import logging
 from collections import deque
 from telegram import Update
@@ -19,16 +21,36 @@ TAVILY_API_KEY  = os.environ.get("TAVILY_API_KEY", "LA_TUA_API_KEY_TAVILY")
 BOT_NAME        = "Scratch"
 GROQ_MODEL      = "llama-3.3-70b-versatile"
 CREATOR_USER    = "d4v3dt"
-WEB_KEYWORDS    = ["internet", "web", "online"]
+
+# Siti affidabili per notizie e macro
+NEWS_SITES = [
+    "ilsole24ore.com", "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
+    "cnbc.com", "marketwatch.com", "investing.com", "milanofinanza.it",
+    "borsaitaliana.it", "bankitalia.it", "ecb.europa.eu",
+    "coindesk.com", "cointelegraph.com",
+]
+ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Parli solo di finanza, economia, mercati e soldi. Se ti chiedono altro, dì che sei fissato con la finanza e non vuoi parlare d'altro.
 Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
 
-SYSTEM_PROMPT_WEB = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
-Ti vengono forniti dei risultati di ricerca dal web. Usali per rispondere alla domanda con dati aggiornati.
-Non elencare i risultati grezzi: rielaborali in una risposta naturale e scorrevole con il tuo stile.
-Parli solo di finanza. Risposte concise ma complete. Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti dati o risultati di ricerca.
+Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
+Se i dati non contengono la risposta, dillo onestamente invece di inventare. Parli solo di finanza.
+Non usare mai il carattere | nelle risposte. Mai muri di testo."""
+
+ROUTER_PROMPT = """Classifica la seguente domanda di un utente in UNA di queste categorie. Rispondi SOLO con la parola della categoria, niente altro.
+
+Categorie:
+- AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico (es. "quanto quota Apple", "prezzo Eni")
+- ETF: qualsiasi cosa riguardi ETF — prezzo di un ETF, lista di ETF su un tema, confronti tra ETF (es. "quota questo ETF IE00...", "lista ETF rinnovabili")
+- NOTIZIA: chiede notizie, eventi, analisi di mercato, dati macroeconomici, crypto (es. "perché è sceso il mercato", "notizie su Bitcoin")
+- CONCETTO: domanda teorica o di spiegazione che non richiede dati aggiornati (es. "cos'è un ETF", "come funziona un'obbligazione")
+
+Domanda: {domanda}
+
+Categoria:"""
 
 # ── Stato globale ───────────────────────────────────────────────────────────────
 bot_awake: dict[int, bool] = {}
@@ -61,46 +83,95 @@ def add_to_history(chat_id: int, role: str, content: str):
     chat_history[chat_id].append({"role": role, "content": content})
 
 
-def needs_web(testo: str) -> bool:
-    return any(kw in testo.lower() for kw in WEB_KEYWORDS)
+def classifica_domanda(domanda: str) -> str:
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": ROUTER_PROMPT.format(domanda=domanda)}],
+            max_tokens=10,
+            temperature=0.0,
+        )
+        cat = response.choices[0].message.content.strip().upper()
+        for c in ["AZIONE", "ETF", "NOTIZIA", "CONCETTO"]:
+            if c in cat:
+                return c
+        return "CONCETTO"
+    except Exception as e:
+        logger.error(f"Errore router: {e}")
+        return "CONCETTO"
 
 
-def clean_keywords(testo: str) -> str:
-    parole = testo.split()
-    parole_pulite = [p for p in parole if p.lower() not in WEB_KEYWORDS]
-    return " ".join(parole_pulite).strip()
+def get_prezzo_azione(query: str) -> str:
+    """Cerca il prezzo di un'azione via Yahoo Finance (URL diretto)."""
+    import urllib.request
+    try:
+        # Prima trova il simbolo dal nome
+        search_url = f"https://query1.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        quotes = data.get("quotes", [])
+        if not quotes:
+            return "NESSUN_DATO"
+        symbol = quotes[0].get("symbol")
+        nome = quotes[0].get("shortname", symbol)
+
+        # Poi prendi il prezzo
+        chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        req2 = urllib.request.Request(chart_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req2, timeout=10) as resp:
+            chart = json.loads(resp.read())
+        result = chart["chart"]["result"][0]
+        meta = result["meta"]
+        prezzo = meta.get("regularMarketPrice")
+        valuta = meta.get("currency", "")
+        prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+        var = ""
+        if prezzo and prev:
+            pct = ((prezzo - prev) / prev) * 100
+            var = f" ({pct:+.2f}% rispetto a ieri)"
+        return f"{nome} ({symbol}): {prezzo} {valuta}{var}"
+    except Exception as e:
+        logger.error(f"Errore Yahoo: {e}")
+        return "ERRORE_DATI"
 
 
-def cerca_web(query: str) -> str:
+def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
     try:
         risultato = tavily_client.search(
             query=query,
-            search_depth="basic",
-            max_results=3,
+            search_depth="advanced",
+            max_results=max_results,
             include_answer=True,
+            include_domains=sites,
         )
         parti = []
         if risultato.get("answer"):
             parti.append(f"Sintesi: {risultato['answer']}")
-        for r in risultato.get("results", [])[:3]:
+        for r in risultato.get("results", [])[:max_results]:
             titolo = r.get("title", "")
-            contenuto = r.get("content", "")[:400]
+            contenuto = r.get("content", "")[:600]
             parti.append(f"- {titolo}: {contenuto}")
-        return "\n".join(parti) if parti else "Nessun risultato trovato."
+        return "\n".join(parti) if parti else "NESSUN_DATO"
     except Exception as e:
         logger.error(f"Errore Tavily: {e}")
-        return "ERRORE_RICERCA"
+        return "ERRORE_DATI"
 
 
-async def ask_groq(chat_id: int, user_message: str, nome: str, web_context: str = None) -> str:
+def is_lista(testo: str) -> bool:
+    parole = ["lista", "quali", "migliori", "elenco", "consigli", "consiglia", "suggerisci"]
+    return any(p in testo.lower() for p in parole)
+
+
+async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None) -> str:
     try:
-        if web_context:
-            system = SYSTEM_PROMPT_WEB
-            history = get_history(chat_id, limit=3)  # memoria corta in modalità web
-            user_content = f"Domanda di {nome}: {user_message}\n\nRisultati dal web:\n{web_context}"
+        if context_data:
+            system = SYSTEM_PROMPT_DATA
+            history = get_history(chat_id, limit=3)
+            user_content = f"Domanda di {nome}: {user_message}\n\nDati disponibili:\n{context_data}"
         else:
             system = SYSTEM_PROMPT
-            history = get_history(chat_id, limit=5)  # memoria piena in modalità normale
+            history = get_history(chat_id, limit=5)
             user_content = f"[Messaggio di {nome}]: {user_message}"
 
         messages = [{"role": "system", "content": system}]
@@ -110,15 +181,13 @@ async def ask_groq(chat_id: int, user_message: str, nome: str, web_context: str 
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            max_tokens=500,
+            max_tokens=600,
             temperature=0.7,
         )
         reply = response.choices[0].message.content.strip()
 
-        # Salva sempre in memoria (sia normale che web)
         add_to_history(chat_id, "user", f"[{nome}]: {user_message}")
         add_to_history(chat_id, "assistant", reply)
-
         return reply
     except Exception as e:
         logger.error(f"Errore Groq: {e}")
@@ -148,7 +217,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not message or not message.text:
         return
-
     if not is_awake(chat_id):
         return
 
@@ -160,31 +228,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.is_bot
     )
-
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
 
-    if needs_web(testo):
-        query = clean_keywords(testo)
-        web_context = cerca_web(query)
-        if web_context == "ERRORE_RICERCA":
-            await message.reply_text("Non riesco a cercare ora. Riprova tra poco.")
-            return
-        reply = await ask_groq(chat_id, query, nome, web_context=web_context)
-    else:
-        reply = await ask_groq(chat_id, testo, nome)
+    categoria = classifica_domanda(testo)
+    logger.info(f"Categoria: {categoria} | Domanda: {testo[:50]}")
 
+    context_data = None
+
+    if categoria == "AZIONE":
+        dato = get_prezzo_azione(testo)
+        if dato in ("NESSUN_DATO", "ERRORE_DATI"):
+            # ripiego: prova come ricerca notizie
+            context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
+        else:
+            context_data = dato
+
+    elif categoria == "ETF":
+        n = 5 if is_lista(testo) else 3
+        context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
+
+    elif categoria == "NOTIZIA":
+        context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
+
+    # CONCETTO: nessuna ricerca, context_data resta None
+
+    if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
+        context_data = None
+
+    reply = await rispondi(chat_id, testo, nome, context_data=context_data)
     await message.reply_text(reply, parse_mode="Markdown")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 def main() -> None:
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("sveglia", cmd_sveglia))
     app.add_handler(CommandHandler("dormi",   cmd_dormi))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logger.info("Scratch è online.")
     app.run_polling()
 
