@@ -3,6 +3,7 @@ import json
 import logging
 import urllib.request
 import urllib.parse
+import re
 from collections import deque
 from telegram import Update
 from telegram.ext import (
@@ -177,6 +178,31 @@ def get_prezzo_azione(titolo: str) -> str:
         return "ERRORE_DATI"
 
 
+def trova_isin(testo: str) -> str:
+    """Cerca un codice ISIN nel testo (2 lettere + 10 caratteri alfanumerici)."""
+    match = re.search(r'\b[A-Z]{2}[A-Z0-9]{10}\b', testo.upper())
+    return match.group(0) if match else None
+
+
+def leggi_pagina_justetf(isin: str) -> str:
+    """Estrae il contenuto della pagina JustETF di uno specifico ISIN via Tavily."""
+    url = f"https://www.justetf.com/it/etf-profile.html?isin={isin}"
+    try:
+        # Tavily extract: legge il contenuto di un URL specifico
+        risultato = tavily_client.extract(urls=[url])
+        contenuti = risultato.get("results", [])
+        if contenuti:
+            testo = contenuti[0].get("raw_content", "") or contenuti[0].get("content", "")
+            if testo:
+                logger.info(f"JustETF OK per ISIN {isin}")
+                return testo[:2500]  # limite per non sforare token
+        logger.info(f"JustETF: nessun contenuto per {isin}")
+        return "NESSUN_DATO"
+    except Exception as e:
+        logger.error(f"Errore JustETF extract: {e}")
+        return "ERRORE_DATI"
+
+
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
     try:
         risultato = tavily_client.search(
@@ -286,8 +312,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             context_data = dato
     elif categoria == "ETF":
-        n = 5 if is_lista(testo) else 3
-        context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
+        isin = trova_isin(testo)
+        if isin:
+            # ISIN presente: vai dritto sulla pagina JustETF di quell'ISIN
+            context_data = leggi_pagina_justetf(isin)
+            if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
+                # ripiego: ricerca normale su JustETF
+                context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
+        else:
+            n = 5 if is_lista(testo) else 3
+            context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
