@@ -54,17 +54,22 @@ ROUTER_PROMPT = """Analizza la domanda di un utente in una chat di finanza. Risp
 
 Il JSON deve avere due campi:
 - "categoria": una tra AZIONE, ETF, NOTIZIA, CONCETTO
-- "titolo": se categoria e AZIONE, il solo nome dell'azienda o titolo (es. "Microsoft", "Apple", "Eni"); altrimenti stringa vuota ""
+- "titolo": dipende dalla categoria:
+   * se AZIONE: il solo nome dell'azienda (es. "Microsoft", "Apple", "Eni")
+   * se ETF e l'utente cerca ETF per tema/settore: il TEMA tradotto in inglese e conciso (es. "artificial intelligence", "renewable energy", "water", "cybersecurity", "semiconductors")
+   * altrimenti: stringa vuota ""
 
 Categorie:
 - AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico
-- ETF: qualsiasi cosa riguardi ETF (prezzo, lista tematica, confronti)
+- ETF: qualsiasi cosa riguardi ETF (prezzo di uno specifico, ricerca per tema, confronti)
 - NOTIZIA: notizie, eventi, analisi di mercato, dati macro, crypto
 - CONCETTO: domanda teorica che non richiede dati aggiornati
 
 Esempi:
 Domanda: "Scratch quanto quota Microsoft?" -> {{"categoria": "AZIONE", "titolo": "Microsoft"}}
-Domanda: "lista ETF rinnovabili" -> {{"categoria": "ETF", "titolo": ""}}
+Domanda: "consigliami un ETF sulle energie rinnovabili" -> {{"categoria": "ETF", "titolo": "renewable energy"}}
+Domanda: "ETF che investe in intelligenza artificiale" -> {{"categoria": "ETF", "titolo": "artificial intelligence"}}
+Domanda: "un etf sulle aziende che producono infrastrutture per l'IA" -> {{"categoria": "ETF", "titolo": "artificial intelligence"}}
 Domanda: "perche sale il bitcoin" -> {{"categoria": "NOTIZIA", "titolo": ""}}
 Domanda: "cos'e un dividendo" -> {{"categoria": "CONCETTO", "titolo": ""}}
 
@@ -233,6 +238,50 @@ def leggi_pagina_justetf(isin: str) -> str:
         return "ERRORE_DATI"
 
 
+def cerca_etf_tematici(tema: str, max_etf: int = 5) -> str:
+    """Cerca ETF per tema sullo screener di JustETF e restituisce nome + ISIN + dati chiave."""
+    url = "https://www.justetf.com/en/search.html"
+    params = {
+        "0-1.0-container-tabsContentContainer-tabsContentRepeater-0-container-content-container-resultContent-etfsContainer-etfsTablePanel": "",
+        "query": tema,
+        "search": "ALL",
+        "_wicket": "1",
+    }
+    full_url = url + "?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(full_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        })
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read())
+
+        etfs = data.get("data", [])
+        if not etfs:
+            logger.info(f"Screener JustETF: nessun ETF per tema '{tema}'")
+            return "NESSUN_DATO"
+
+        righe = []
+        for e in etfs[:max_etf]:
+            nome = e.get("name", "")
+            isin = e.get("isin", "")
+            ter = e.get("ter", "")
+            size = e.get("fundSize", "")
+            ret1y = e.get("yearReturnCUR", "")
+            if nome and isin:
+                righe.append(
+                    f"- {nome} | ISIN: {isin} | TER: {ter} | Dimensione: {size} mln | Rendimento 1 anno: {ret1y}"
+                )
+        if not righe:
+            return "NESSUN_DATO"
+        logger.info(f"Screener JustETF OK: {len(righe)} ETF per tema '{tema}'")
+        return "\n".join(righe)
+    except Exception as e:
+        logger.error(f"Errore screener JustETF: {e}")
+        return "ERRORE_DATI"
+
+
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
     try:
         risultato = tavily_client.search(
@@ -357,8 +406,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
         else:
-            n = 5 if is_lista(testo) else 3
-            context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
+            # Nessun ISIN: prova lo screener tematico di JustETF (nomi + ISIN reali)
+            tema = titolo if titolo else testo
+            context_data = cerca_etf_tematici(tema, max_etf=5)
+            if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
+                n = 5 if is_lista(testo) else 3
+                context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
