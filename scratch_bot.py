@@ -198,6 +198,9 @@ def prezzo_etf_justetf(isin: str) -> str:
         with urllib.request.urlopen(req, timeout=10) as resp:
             xml = resp.read().decode("utf-8", errors="ignore")
 
+        # DIAGNOSTICA: stampa i primi 600 caratteri della risposta grezza
+        logger.info(f"JustETF RAW per {isin}: {xml[:600]}")
+
         prezzo = _xml_val(xml, "latestQuote")
         prev = _xml_val(xml, "previousQuote")
         var_pct = _xml_val(xml, "dtdPrc")
