@@ -37,7 +37,7 @@ ETF_SITES = ["justetf.com", "morningstar.it"]
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Tratti solo argomenti di finanza, economia, mercati e investimenti. Se qualcuno ti fa una domanda completamente fuori tema (non finanziaria), allora rispondi che sei fissato con la finanza e non parli d'altro. Ma se la domanda E gia di finanza, rispondi e basta, senza mai precisare di cosa non parli.
 
-LUNGHEZZA: sii CONCISO di default, dai l'essenziale in 3-4 frasi e non dilungarti. Quando l'argomento avrebbe altro da aggiungere, chiudi con: "Vuoi che approfondisca?".
+LUNGHEZZA: sii CONCISO, dai l'essenziale in 3-4 frasi e non dilungarti. NON chiedere se vuoi approfondire: rispondi e basta.
 
 Formattazione: per spiegazioni usa paragrafi brevi; per liste o confronti usa bullet col trattino. Non usare mai il carattere | nelle risposte."""
 
@@ -45,13 +45,12 @@ SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti 
 Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
 Se i dati non contengono la risposta, dillo onestamente invece di inventare. Non commentare mai su argomenti che non tratti: rispondi solo a cio che ti viene chiesto.
 
-LUNGHEZZA: sii CONCISO di default. Dai l'essenziale in poche righe (3-4 frasi al massimo per notizie e concetti). NON dilungarti.
-Quando l'argomento avrebbe altro da dire (notizia, concetto, analisi), chiudi con una riga tipo: "Vuoi che approfondisca?". NON aggiungere questa frase dopo una semplice quotazione di prezzo.
+LUNGHEZZA: sii CONCISO. Dai l'essenziale in poche righe (3-4 frasi al massimo per notizie e concetti). NON dilungarti e NON chiedere se vuoi approfondire: rispondi e basta.
 
 FORMATTAZIONE:
-- Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca. Niente invito ad approfondire.
-- Per LISTE/RICERCHE DI ETF: elenca i nomi trovati con bullet col trattino. Se nei dati c'e un LINK_LISTA_JUSTETF o LINK_LISTA, presentalo dicendo che li trova la lista completa con tutti i codici ISIN su JustETF. Tieni il link invariato.
-- Per NOTIZIE e CONCETTI: poche righe essenziali, poi l'invito ad approfondire.
+- Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca.
+- Per LISTE/RICERCHE DI ETF: elenca i nomi trovati con bullet col trattino. Quando ti viene fornito un indirizzo web (che inizia con http), riportalo SEMPRE per intero e identico, lettera per lettera. NON sostituirlo mai con sigle, etichette o testo abbreviato. Il link deve comparire completo nella risposta.
+- Per NOTIZIE e CONCETTI: poche righe essenziali e stop.
 
 Non usare mai il carattere | nelle risposte."""
 
@@ -253,10 +252,13 @@ def cerca_etf_tematici(tema: str, testo_originale: str) -> str:
     """Cerca ETF per tema via Tavily su JustETF/Morningstar e aggiunge il link alla lista JustETF."""
     risultati = cerca_tavily(testo_originale, ETF_SITES, max_results=5)
     link = link_justetf_tema(tema)
+    istruzione = (
+        f"\n\nIMPORTANTE: alla fine indica che la lista completa con tutti i codici ISIN e su JustETF a questo "
+        f"indirizzo, da riportare ESATTAMENTE e per intero cosi com'e (senza abbreviarlo): {link}"
+    )
     if risultati in ("NESSUN_DATO", "ERRORE_DATI"):
-        # Anche senza risultati testuali, diamo almeno il link alla lista
-        return f"LINK_LISTA: {link}"
-    return f"{risultati}\n\nLINK_LISTA_JUSTETF: {link}"
+        return f"Nessun nome specifico trovato.{istruzione}"
+    return f"{risultati}{istruzione}"
 
 
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
@@ -405,9 +407,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
 
-    # Di default conciso. Lungo SOLO se l'utente chiede esplicitamente di approfondire.
-    lungo = vuole_approfondire(testo)
-    reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=lungo)
+    # Sempre conciso
+    reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=False)
     await message.reply_text(reply, parse_mode="Markdown")
 
 
