@@ -184,19 +184,65 @@ def trova_isin(testo: str) -> str:
     return match.group(0) if match else None
 
 
+def _xml_val(blocco: str, tag: str) -> str:
+    """Estrae il contenuto raw di un tag dall'XML (semplice, senza librerie)."""
+    m = re.search(rf"<{tag}>.*?<raw>(.*?)</raw>", blocco, re.DOTALL)
+    return m.group(1) if m else None
+
+
+def prezzo_etf_justetf(isin: str) -> str:
+    """Prende il prezzo di un ETF dall'endpoint quote di JustETF (XML)."""
+    url = f"https://www.justetf.com/api/etfs/{isin}/quote?locale=it&currency=EUR&isin={isin}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            xml = resp.read().decode("utf-8", errors="ignore")
+
+        prezzo = _xml_val(xml, "latestQuote")
+        prev = _xml_val(xml, "previousQuote")
+        var_pct = _xml_val(xml, "dtdPrc")
+
+        # min e high stanno dentro quoteLowHigh
+        low = high = None
+        mlow = re.search(r"<low>.*?<raw>(.*?)</raw>", xml, re.DOTALL)
+        mhigh = re.search(r"<high>.*?<raw>(.*?)</raw>", xml, re.DOTALL)
+        if mlow:
+            low = mlow.group(1)
+        if mhigh:
+            high = mhigh.group(1)
+
+        venue_m = re.search(r"<quoteTradingVenue>(.*?)</quoteTradingVenue>", xml)
+        venue = venue_m.group(1) if venue_m else ""
+
+        if not prezzo:
+            logger.info(f"JustETF quote: nessun prezzo per {isin}")
+            return "NESSUN_DATO"
+
+        logger.info(f"JustETF quote OK: {isin} = {prezzo} EUR")
+        righe = [f"ISIN: {isin}", f"Prezzo: {prezzo} EUR"]
+        if var_pct:
+            righe.append(f"Variazione giornaliera: {var_pct}%")
+        if low and high:
+            righe.append(f"Intervallo (min-max): {low} - {high} EUR")
+        if venue:
+            righe.append(f"Borsa: {venue}")
+        return "\n".join(righe)
+    except Exception as e:
+        logger.error(f"Errore JustETF quote: {e}")
+        return "ERRORE_DATI"
+
+
 def leggi_pagina_justetf(isin: str) -> str:
-    """Estrae il contenuto della pagina JustETF di uno specifico ISIN via Tavily."""
+    """Estrae le info descrittive dell'ETF dalla pagina JustETF via Tavily."""
     url = f"https://www.justetf.com/it/etf-profile.html?isin={isin}"
     try:
-        # Tavily extract: legge il contenuto di un URL specifico
         risultato = tavily_client.extract(urls=[url])
         contenuti = risultato.get("results", [])
         if contenuti:
             testo = contenuti[0].get("raw_content", "") or contenuti[0].get("content", "")
             if testo:
-                logger.info(f"JustETF OK per ISIN {isin}")
-                return testo[:2500]  # limite per non sforare token
-        logger.info(f"JustETF: nessun contenuto per {isin}")
+                logger.info(f"JustETF info OK per ISIN {isin}")
+                return testo[:1800]
         return "NESSUN_DATO"
     except Exception as e:
         logger.error(f"Errore JustETF extract: {e}")
@@ -314,10 +360,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif categoria == "ETF":
         isin = trova_isin(testo)
         if isin:
-            # ISIN presente: vai dritto sulla pagina JustETF di quell'ISIN
-            context_data = leggi_pagina_justetf(isin)
-            if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
-                # ripiego: ricerca normale su JustETF
+            # ISIN presente: prezzo dall'endpoint quote + info descrittive dalla pagina
+            prezzo = prezzo_etf_justetf(isin)
+            info = leggi_pagina_justetf(isin)
+            parti = []
+            if prezzo not in ("NESSUN_DATO", "ERRORE_DATI"):
+                parti.append("QUOTAZIONE:\n" + prezzo)
+            if info not in ("NESSUN_DATO", "ERRORE_DATI"):
+                parti.append("INFORMAZIONI FONDO:\n" + info)
+            if parti:
+                context_data = "\n\n".join(parti)
+            else:
                 context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
         else:
             n = 5 if is_lista(testo) else 3
