@@ -245,7 +245,7 @@ def leggi_pagina_justetf(isin: str) -> str:
 def link_justetf_tema(tema: str) -> str:
     """Link alla pagina di ricerca JustETF per un tema, dove ci sono gli ISIN."""
     q = urllib.parse.quote_plus(tema)
-    return f"https://www.justetf.com/it/search.html?query={q}"
+    return f"https://www.justetf.com/it/search.html?query={q}&search=ALL"
 
 
 def cerca_etf_tematici(tema: str, testo_originale: str) -> str:
