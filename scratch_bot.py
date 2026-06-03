@@ -248,17 +248,16 @@ def link_justetf_tema(tema: str) -> str:
     return f"https://www.justetf.com/it/search.html?query={q}&search=ALL"
 
 
-def cerca_etf_tematici(tema: str, testo_originale: str) -> str:
-    """Cerca ETF per tema via Tavily su JustETF/Morningstar e aggiunge il link alla lista JustETF."""
+def cerca_etf_tematici(tema: str, testo_originale: str) -> tuple:
+    """Cerca ETF per tema via Tavily. Ritorna (dati_per_llama, link_justetf).
+    Il link NON viene dato a llama: lo attacca il codice dopo, per non farlo rovinare."""
     risultati = cerca_tavily(testo_originale, ETF_SITES, max_results=5)
     link = link_justetf_tema(tema)
-    istruzione = (
-        f"\n\nIMPORTANTE: alla fine indica che la lista completa con tutti i codici ISIN e su JustETF a questo "
-        f"indirizzo, da riportare ESATTAMENTE e per intero cosi com'e (senza abbreviarlo): {link}"
-    )
     if risultati in ("NESSUN_DATO", "ERRORE_DATI"):
-        return f"Nessun nome specifico trovato.{istruzione}"
-    return f"{risultati}{istruzione}"
+        return ("Nessun nome specifico di ETF trovato nei risultati.", link)
+    # Diciamo a llama di NON inventare link: ci pensa il codice
+    nota = "\n\n(Non scrivere tu nessun link o indirizzo web: verra aggiunto automaticamente dopo.)"
+    return (f"{risultati}{nota}", link)
 
 
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
@@ -374,6 +373,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Categoria: {categoria} | Titolo: '{titolo}' | Domanda: {testo[:50]}")
 
     context_data = None
+    link_etf_da_aggiungere = None
 
     if categoria == "AZIONE":
         nome_titolo = titolo if titolo else testo
@@ -400,7 +400,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             # Nessun ISIN: ricerca tematica via Tavily + link alla lista JustETF con gli ISIN
             tema = titolo if titolo else testo
-            context_data = cerca_etf_tematici(tema, testo)
+            context_data, link_etf_da_aggiungere = cerca_etf_tematici(tema, testo)
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
@@ -409,7 +409,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Sempre conciso
     reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=False)
-    await message.reply_text(reply, parse_mode="Markdown")
+
+    # Il link JustETF lo attacca il CODICE (non llama, che lo rovinerebbe)
+    if link_etf_da_aggiungere:
+        reply = f"{reply}\n\nLista completa con tutti gli ISIN su JustETF:\n{link_etf_da_aggiungere}"
+
+    await message.reply_text(reply, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # ── Main ────────────────────────────────────────────────────────────────────────
