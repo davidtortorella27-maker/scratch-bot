@@ -36,17 +36,22 @@ ETF_SITES = ["justetf.com", "morningstar.it"]
 
 SYSTEM_PROMPT = """Sei Scratch, assistente finanziario in una chat di gruppo. Parli semplice, chiaro, alla portata di tutti.
 Tratti solo argomenti di finanza, economia, mercati e investimenti. Se qualcuno ti fa una domanda completamente fuori tema (non finanziaria), allora rispondi che sei fissato con la finanza e non parli d'altro. Ma se la domanda E gia di finanza, rispondi e basta, senza mai precisare di cosa non parli.
-Formattazione: per spiegazioni e concetti usa paragrafi discorsivi; per liste, dati o confronti usa bullet point col trattino e titoli in grassetto.
-Non usare mai il carattere | nelle risposte."""
+
+LUNGHEZZA: sii CONCISO di default, dai l'essenziale in 3-4 frasi e non dilungarti. Quando l'argomento avrebbe altro da aggiungere, chiudi con: "Vuoi che approfondisca?".
+
+Formattazione: per spiegazioni usa paragrafi brevi; per liste o confronti usa bullet col trattino. Non usare mai il carattere | nelle risposte."""
 
 SYSTEM_PROMPT_DATA = """Sei Scratch, assistente finanziario. Ti vengono forniti dati o risultati di ricerca.
 Usali per rispondere con dati aggiornati. Non elencare i risultati grezzi: rielaborali con il tuo stile, semplice e chiaro.
 Se i dati non contengono la risposta, dillo onestamente invece di inventare. Non commentare mai su argomenti che non tratti: rispondi solo a cio che ti viene chiesto.
 
-FORMATTAZIONE ADATTIVA:
-- Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca.
-- Per LISTE DI ETF: per ogni ETF riporta il nome completo e, se presente nei dati, il codice ISIN. Usa bullet col trattino.
-- Per NOTIZIE, ANALISI MACROECONOMICHE e SPIEGAZIONI: usa paragrafi discorsivi, puoi essere piu ampio e articolato per spiegare bene.
+LUNGHEZZA: sii CONCISO di default. Dai l'essenziale in poche righe (3-4 frasi al massimo per notizie e concetti). NON dilungarti.
+Quando l'argomento avrebbe altro da dire (notizia, concetto, analisi), chiudi con una riga tipo: "Vuoi che approfondisca?". NON aggiungere questa frase dopo una semplice quotazione di prezzo.
+
+FORMATTAZIONE:
+- Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca. Niente invito ad approfondire.
+- Per LISTE/RICERCHE DI ETF: elenca i nomi trovati con bullet col trattino. Se nei dati c'e un LINK_LISTA_JUSTETF o LINK_LISTA, presentalo dicendo che li trova la lista completa con tutti i codici ISIN su JustETF. Tieni il link invariato.
+- Per NOTIZIE e CONCETTI: poche righe essenziali, poi l'invito ad approfondire.
 
 Non usare mai il carattere | nelle risposte."""
 
@@ -238,48 +243,20 @@ def leggi_pagina_justetf(isin: str) -> str:
         return "ERRORE_DATI"
 
 
-def cerca_etf_tematici(tema: str, max_etf: int = 5) -> str:
-    """Cerca ETF per tema sullo screener di JustETF e restituisce nome + ISIN + dati chiave."""
-    url = "https://www.justetf.com/en/search.html"
-    params = {
-        "0-1.0-container-tabsContentContainer-tabsContentRepeater-0-container-content-container-resultContent-etfsContainer-etfsTablePanel": "",
-        "query": tema,
-        "search": "ALL",
-        "_wicket": "1",
-    }
-    full_url = url + "?" + urllib.parse.urlencode(params)
-    try:
-        req = urllib.request.Request(full_url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-        })
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            data = json.loads(resp.read())
+def link_justetf_tema(tema: str) -> str:
+    """Link alla pagina di ricerca JustETF per un tema, dove ci sono gli ISIN."""
+    q = urllib.parse.quote_plus(tema)
+    return f"https://www.justetf.com/it/search.html?query={q}"
 
-        etfs = data.get("data", [])
-        if not etfs:
-            logger.info(f"Screener JustETF: nessun ETF per tema '{tema}'")
-            return "NESSUN_DATO"
 
-        righe = []
-        for e in etfs[:max_etf]:
-            nome = e.get("name", "")
-            isin = e.get("isin", "")
-            ter = e.get("ter", "")
-            size = e.get("fundSize", "")
-            ret1y = e.get("yearReturnCUR", "")
-            if nome and isin:
-                righe.append(
-                    f"- {nome} | ISIN: {isin} | TER: {ter} | Dimensione: {size} mln | Rendimento 1 anno: {ret1y}"
-                )
-        if not righe:
-            return "NESSUN_DATO"
-        logger.info(f"Screener JustETF OK: {len(righe)} ETF per tema '{tema}'")
-        return "\n".join(righe)
-    except Exception as e:
-        logger.error(f"Errore screener JustETF: {e}")
-        return "ERRORE_DATI"
+def cerca_etf_tematici(tema: str, testo_originale: str) -> str:
+    """Cerca ETF per tema via Tavily su JustETF/Morningstar e aggiunge il link alla lista JustETF."""
+    risultati = cerca_tavily(testo_originale, ETF_SITES, max_results=5)
+    link = link_justetf_tema(tema)
+    if risultati in ("NESSUN_DATO", "ERRORE_DATI"):
+        # Anche senza risultati testuali, diamo almeno il link alla lista
+        return f"LINK_LISTA: {link}"
+    return f"{risultati}\n\nLINK_LISTA_JUSTETF: {link}"
 
 
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
@@ -309,6 +286,19 @@ def is_lista(testo: str) -> bool:
     return any(p in testo.lower() for p in parole)
 
 
+def vuole_approfondire(testo: str) -> bool:
+    """Capisce se l'utente sta chiedendo di approfondire/espandere la risposta."""
+    t = testo.lower()
+    frasi = [
+        "approfondisci", "approfondire", "dimmi di piu", "dimmi di più", "piu dettagli",
+        "più dettagli", "piu informazioni", "più informazioni", "spiega meglio",
+        "spiegami meglio", "vai nel dettaglio", "nel dettaglio", "piu nel dettaglio",
+        "più nel dettaglio", "raccontami di piu", "raccontami di più", "estenditi",
+        "piu dettagliata", "più dettagliata", "elabora", "in dettaglio",
+    ]
+    return any(f in t for f in frasi)
+
+
 async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None, lungo: bool = False) -> str:
     try:
         if context_data:
@@ -324,7 +314,7 @@ async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str
         messages.extend(history)
         messages.append({"role": "user", "content": user_content})
 
-        max_tok = 700 if lungo else 350
+        max_tok = 800 if lungo else 250
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
@@ -406,20 +396,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
         else:
-            # Nessun ISIN: prova lo screener tematico di JustETF (nomi + ISIN reali)
+            # Nessun ISIN: ricerca tematica via Tavily + link alla lista JustETF con gli ISIN
             tema = titolo if titolo else testo
-            context_data = cerca_etf_tematici(tema, max_etf=5)
-            if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
-                n = 5 if is_lista(testo) else 3
-                context_data = cerca_tavily(testo, ETF_SITES, max_results=n)
+            context_data = cerca_etf_tematici(tema, testo)
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
 
-    # Risposte piu lunghe per concetti, notizie/macro ed ETF; corte per le quotazioni
-    lungo = categoria in ("ETF", "NOTIZIA", "CONCETTO")
+    # Di default conciso. Lungo SOLO se l'utente chiede esplicitamente di approfondire.
+    lungo = vuole_approfondire(testo)
     reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=lungo)
     await message.reply_text(reply, parse_mode="Markdown")
 
