@@ -184,38 +184,19 @@ def trova_isin(testo: str) -> str:
     return match.group(0) if match else None
 
 
-def _xml_val(blocco: str, tag: str) -> str:
-    """Estrae il contenuto raw di un tag dall'XML (semplice, senza librerie)."""
-    m = re.search(rf"<{tag}>.*?<raw>(.*?)</raw>", blocco, re.DOTALL)
-    return m.group(1) if m else None
-
-
 def prezzo_etf_justetf(isin: str) -> str:
-    """Prende il prezzo di un ETF dall'endpoint quote di JustETF (XML)."""
+    """Prende il prezzo di un ETF dall'endpoint quote di JustETF (JSON)."""
     url = f"https://www.justetf.com/api/etfs/{isin}/quote?locale=it&currency=EUR&isin={isin}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            xml = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(resp.read())
 
-        # DIAGNOSTICA: stampa i primi 600 caratteri della risposta grezza
-        logger.info(f"JustETF RAW per {isin}: {xml[:600]}")
-
-        prezzo = _xml_val(xml, "latestQuote")
-        prev = _xml_val(xml, "previousQuote")
-        var_pct = _xml_val(xml, "dtdPrc")
-
-        # min e high stanno dentro quoteLowHigh
-        low = high = None
-        mlow = re.search(r"<low>.*?<raw>(.*?)</raw>", xml, re.DOTALL)
-        mhigh = re.search(r"<high>.*?<raw>(.*?)</raw>", xml, re.DOTALL)
-        if mlow:
-            low = mlow.group(1)
-        if mhigh:
-            high = mhigh.group(1)
-
-        venue_m = re.search(r"<quoteTradingVenue>(.*?)</quoteTradingVenue>", xml)
-        venue = venue_m.group(1) if venue_m else ""
+        prezzo = data.get("latestQuote", {}).get("localized")
+        var_pct = data.get("dtdPrc", {}).get("localized")
+        low = data.get("quoteLowHigh", {}).get("low", {}).get("localized")
+        high = data.get("quoteLowHigh", {}).get("high", {}).get("localized")
+        venue = data.get("quoteTradingVenue", "")
 
         if not prezzo:
             logger.info(f"JustETF quote: nessun prezzo per {isin}")
