@@ -300,16 +300,19 @@ def vuole_approfondire(testo: str) -> bool:
     return any(f in t for f in frasi)
 
 
-async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None, lungo: bool = False) -> str:
+async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None, lungo: bool = False, testo_in_reply: str = "") -> str:
     try:
+        contesto_reply = ""
+        if testo_in_reply:
+            contesto_reply = f"\n\n(L'utente sta rispondendo a questo messaggio precedente, usalo come contesto:\n{testo_in_reply})"
         if context_data:
             system = SYSTEM_PROMPT_DATA
             history = get_history(chat_id, limit=3)
-            user_content = f"Domanda di {nome}: {user_message}\n\nDati disponibili:\n{context_data}"
+            user_content = f"Domanda di {nome}: {user_message}{contesto_reply}\n\nDati disponibili:\n{context_data}"
         else:
             system = SYSTEM_PROMPT
             history = get_history(chat_id, limit=5)
-            user_content = f"[Messaggio di {nome}]: {user_message}"
+            user_content = f"[Messaggio di {nome}]: {user_message}{contesto_reply}"
 
         messages = [{"role": "system", "content": system}]
         messages.extend(history)
@@ -369,6 +372,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
 
+    # Se l'utente ha fatto reply a un messaggio, catturo quel testo: e' il contesto a cui si riferisce
+    testo_in_reply = ""
+    if message.reply_to_message is not None and message.reply_to_message.text:
+        testo_in_reply = message.reply_to_message.text
+
+    # Testo combinato usato per estrarre ISIN/tema: la frase nuova PIU' il messaggio richiamato
+    testo_esteso = (testo + "\n" + testo_in_reply).strip() if testo_in_reply else testo
+
     categoria, titolo = classifica_ed_estrai(testo)
     logger.info(f"Categoria: {categoria} | Titolo: '{titolo}' | Domanda: {testo[:50]}")
 
@@ -383,7 +394,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             context_data = dato
     elif categoria == "ETF":
-        isin = trova_isin(testo)
+        isin = trova_isin(testo_esteso)  # cerca ISIN anche nel messaggio richiamato col reply
         if isin:
             # ISIN presente: prezzo dall'endpoint quote + info descrittive dalla pagina
             prezzo = prezzo_etf_justetf(isin)
@@ -397,18 +408,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context_data = "\n\n".join(parti)
             else:
                 context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
+        elif titolo:
+            # C'e un tema chiaro estratto dal router: ricerca tematica + link JustETF
+            context_data, link_etf_da_aggiungere = cerca_etf_tematici(titolo, testo)
         else:
-            # Nessun ISIN: ricerca tematica via Tavily + link alla lista JustETF con gli ISIN
-            tema = titolo if titolo else testo
-            context_data, link_etf_da_aggiungere = cerca_etf_tematici(tema, testo)
+            # Domanda ETF vaga: niente ISIN, niente tema. Non inventare ricerche: chiedi di specificare.
+            context_data = "DOMANDA_ETF_VAGA"
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
 
-    # Sempre conciso
-    reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=False)
+    # Caso domanda ETF vaga: chiedi di specificare quale ETF, senza inventare
+    if context_data == "DOMANDA_ETF_VAGA":
+        reply = "Di quale ETF parli? Dimmi il nome o il codice ISIN e ti do prezzo e dati."
+        add_to_history(chat_id, "user", f"[{nome}]: {testo}")
+        add_to_history(chat_id, "assistant", reply)
+        await message.reply_text(reply)
+        return
+
+    # Sempre conciso. Passo anche l'eventuale messaggio in reply come contesto.
+    reply = await rispondi(chat_id, testo, nome, context_data=context_data, lungo=False, testo_in_reply=testo_in_reply)
 
     # Il link JustETF lo attacca il CODICE (non llama, che lo rovinerebbe)
     if link_etf_da_aggiungere:
