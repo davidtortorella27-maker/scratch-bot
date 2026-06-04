@@ -264,13 +264,11 @@ def link_justetf_tema(tema: str) -> str:
 def cerca_etf_screener(tema: str) -> list:
     """
     Cerca ETF per tema usando l'endpoint interno di JustETF.
-    Strategia: carica prima la pagina per ottenere i cookie di sessione Wicket,
-    poi fa la chiamata AJAX con quei cookie.
+    Due step: carica la pagina per i cookie di sessione Wicket, poi chiama l'endpoint AJAX.
     Ritorna lista di dict {name, isin, ter, fundSize, yearReturn} o lista vuota.
     """
     tema_q = urllib.parse.quote_plus(tema)
     page_url = f"https://www.justetf.com/it/search.html?query={tema_q}&search=ALL"
-    # Endpoint AJAX interno — il path del componente Wicket è fisso per pagine nuove
     ajax_url = (
         "https://www.justetf.com/it/search.html?"
         "1-1.0-container-tabsContentContainer-tabsContentRepeater-0-container-content-"
@@ -284,19 +282,23 @@ def cerca_etf_screener(tema: str) -> list:
             "Chrome/124.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        "Connection": "keep-alive",
     }
     try:
         cj = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
-        # Step 1: carica la pagina di ricerca per ottenere i cookie di sessione
+        # Step 1: carica la pagina principale per ottenere i cookie di sessione Wicket
         req_page = urllib.request.Request(page_url, headers={
             **base_headers,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Upgrade-Insecure-Requests": "1",
         })
-        opener.open(req_page, timeout=12)
+        opener.open(req_page, timeout=15)
+        cookie_names = [c.name for c in cj]
+        logger.info(f"Screener — cookie ottenuti: {cookie_names}")
 
-        # Step 2: chiama l'endpoint AJAX con i cookie appena ottenuti
+        # Step 2: chiamata AJAX con i cookie di sessione
         req_ajax = urllib.request.Request(ajax_url, headers={
             **base_headers,
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -306,8 +308,16 @@ def cerca_etf_screener(tema: str) -> list:
             "Referer": page_url,
         })
         with opener.open(req_ajax, timeout=15) as resp:
-            data = json.loads(resp.read())
+            raw = resp.read()
 
+        if not raw:
+            logger.error("Screener JustETF: risposta vuota")
+            return []
+
+        # Log dei primi caratteri per diagnostica
+        logger.info(f"Screener risposta (primi 100 char): {raw[:100]}")
+
+        data = json.loads(raw)
         risultati = []
         for etf in data.get("data", [])[:6]:
             isin_val = etf.get("isin", "")
@@ -324,6 +334,9 @@ def cerca_etf_screener(tema: str) -> list:
         logger.info(f"Screener JustETF OK: {len(risultati)} ETF per tema '{tema}'")
         return risultati
 
+    except json.JSONDecodeError as e:
+        logger.error(f"Screener JustETF: risposta non e JSON. Errore: {e}")
+        return []
     except Exception as e:
         logger.error(f"Errore screener JustETF: {e}")
         return []
@@ -510,11 +523,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         else:
             # Domanda ETF vaga senza ISIN né tema
-            reply = "Di quale ETF parli? Dimmi il nome o il codice ISIN e ti do prezzo e dati."
-            add_to_history(chat_id, "user", f"[{nome}]: {testo}")
-            add_to_history(chat_id, "assistant", reply)
-            await message.reply_text(reply)
-            return
+            if testo_in_reply:
+                # L'utente ha fatto reply: usa il contesto del messaggio precedente
+                context_data = f"L'utente si riferisce a questo messaggio precedente:\n{testo_in_reply}"
+            else:
+                reply_msg = "Di quale ETF parli? Dimmi il nome o il codice ISIN e ti do prezzo e dati."
+                add_to_history(chat_id, "user", f"[{nome}]: {testo}")
+                add_to_history(chat_id, "assistant", reply_msg)
+                await message.reply_text(reply_msg)
+                return
 
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
