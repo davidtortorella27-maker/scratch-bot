@@ -3,8 +3,6 @@ import json
 import logging
 import urllib.request
 import urllib.parse
-import urllib.error
-import http.cookiejar
 import re
 from collections import deque
 from telegram import Update
@@ -51,7 +49,7 @@ LUNGHEZZA: sii CONCISO. Dai l'essenziale in poche righe (3-4 frasi al massimo pe
 
 FORMATTAZIONE:
 - Per QUOTAZIONI e PREZZI: titolo in grassetto e bullet col trattino, ogni dato su una riga, risposta secca.
-- Per LISTE/RICERCHE DI ETF: elenca i nomi trovati con bullet col trattino. Quando ti viene fornito un indirizzo web (che inizia con http), riportalo SEMPRE per intero e identico, lettera per lettera. NON sostituirlo mai con sigle, etichette o testo abbreviato. Il link deve comparire completo nella risposta.
+- Per LISTE/RICERCHE DI ETF: elenca i nomi trovati con bullet col trattino. Quando ti viene fornito un indirizzo web (che inizia con http), riportalo SEMPRE per intero e identico, lettera per lettera. NON sostituirlo mai con sigle, etichette o testo abbreviato.
 - Per NOTIZIE e CONCETTI: poche righe essenziali e stop.
 
 Non usare mai il carattere | nelle risposte."""
@@ -62,26 +60,25 @@ Il JSON deve avere due campi:
 - "categoria": una tra AZIONE, ETF, NOTIZIA, CONCETTO
 - "titolo": dipende dalla categoria:
    * se AZIONE: il solo nome dell'azienda (es. "Microsoft", "Apple", "Eni")
-   * se ETF e l'utente cerca ETF per tema/settore: il TEMA tradotto in inglese e conciso (es. "artificial intelligence", "renewable energy", "water", "cybersecurity", "semiconductors")
+   * se ETF e l'utente cerca ETF per tema/settore: il TEMA tradotto in inglese e conciso (es. "artificial intelligence", "renewable energy", "water")
    * altrimenti: stringa vuota ""
 
 Categorie:
-- AZIONE: chiede il prezzo/quotazione di un'azione o titolo specifico
-- ETF: qualsiasi cosa riguardi ETF (prezzo di uno specifico, ricerca per tema, confronti)
+- AZIONE: chiede il prezzo di un'azione o azienda specifica
+- ETF: qualsiasi cosa riguardi ETF — prezzo di un ETF specifico, ricerca per tema, confronti. Se nel messaggio compare esplicitamente la parola "ETF", classifica SEMPRE come ETF.
 - NOTIZIA: notizie, eventi, analisi di mercato, dati macro, crypto
 - CONCETTO: domanda teorica che non richiede dati aggiornati
 
-IMPORTANTE: se la domanda e vaga e non contiene un tema specifico (es. "info su questo ETF", "quelli di prima"), metti titolo: "".
+IMPORTANTE: se la domanda e vaga e non contiene un tema specifico, metti titolo: "".
 
 Esempi:
 Domanda: "Scratch quanto quota Microsoft?" -> {{"categoria": "AZIONE", "titolo": "Microsoft"}}
+Domanda: "quanto quota questo ETF IE00BGV5VN51?" -> {{"categoria": "ETF", "titolo": ""}}
 Domanda: "consigliami un ETF sulle energie rinnovabili" -> {{"categoria": "ETF", "titolo": "renewable energy"}}
 Domanda: "ETF che investe in intelligenza artificiale" -> {{"categoria": "ETF", "titolo": "artificial intelligence"}}
-Domanda: "un etf sulle aziende che producono infrastrutture per l'IA" -> {{"categoria": "ETF", "titolo": "artificial intelligence infrastructure"}}
 Domanda: "perche sale il bitcoin" -> {{"categoria": "NOTIZIA", "titolo": ""}}
 Domanda: "cos'e un dividendo" -> {{"categoria": "CONCETTO", "titolo": ""}}
 Domanda: "info su questo ETF" -> {{"categoria": "ETF", "titolo": ""}}
-Domanda: "quelli che mi hai suggerito" -> {{"categoria": "ETF", "titolo": ""}}
 
 Domanda: "{domanda}"
 
@@ -123,7 +120,7 @@ def classifica_ed_estrai(domanda: str) -> tuple:
         response = groq_client.chat.completions.create(
             model=MODEL_ROUTER,
             messages=[{"role": "user", "content": ROUTER_PROMPT.format(domanda=domanda)}],
-            max_tokens=50,
+            max_tokens=60,
             temperature=0.0,
         )
         raw = response.choices[0].message.content.strip()
@@ -133,8 +130,7 @@ def classifica_ed_estrai(domanda: str) -> tuple:
         titolo = data.get("titolo", "").strip()
         if cat not in ("AZIONE", "ETF", "NOTIZIA", "CONCETTO"):
             cat = "CONCETTO"
-        # Sicurezza: se il titolo e la domanda intera o quasi, ignoralo
-        if len(titolo) > 40:
+        if len(titolo) > 50:
             titolo = ""
         return cat, titolo
     except Exception as e:
@@ -194,7 +190,7 @@ def get_prezzo_azione(titolo: str) -> str:
 
 
 def trova_isin(testo: str) -> str:
-    """Cerca un codice ISIN nel testo. Deve contenere almeno una cifra."""
+    """Cerca un ISIN nel testo. Deve contenere almeno una cifra."""
     for match in re.finditer(r'\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b', testo.upper()):
         candidato = match.group(0)
         if any(c.isdigit() for c in candidato):
@@ -207,7 +203,7 @@ def trova_isin(testo: str) -> str:
 
 
 def prezzo_etf_justetf(isin: str) -> str:
-    """Prende il prezzo di un ETF dall'endpoint quote di JustETF (JSON)."""
+    """Prende il prezzo di un ETF dall'endpoint quote di JustETF."""
     url = f"https://www.justetf.com/api/etfs/{isin}/quote?locale=it&currency=EUR&isin={isin}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -261,111 +257,14 @@ def link_justetf_tema(tema: str) -> str:
     return f"https://www.justetf.com/it/search.html?query={q}&search=ALL"
 
 
-def cerca_etf_screener(tema: str) -> list:
-    """
-    Cerca ETF per tema usando l'endpoint interno di JustETF.
-    1) Carica la pagina HTML per ottenere cookie e page ID reale di Wicket.
-    2) Usa quel page ID per costruire l'URL AJAX corretto.
-    Ritorna lista di dict {name, isin, ter, fundSize, yearReturn} o lista vuota.
-    """
-    # Path fisso del componente Wicket (non cambia con il design della pagina)
-    COMP_PATH = (
-        "container-tabsContentContainer-tabsContentRepeater-0-container-content-"
-        "container-resultContent-etfsContainer-etfsTablePanel"
-    )
-    tema_q = urllib.parse.quote_plus(tema)
-    page_url = f"https://www.justetf.com/it/search.html?query={tema_q}&search=ALL"
-
-    base_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-        "Connection": "keep-alive",
-    }
-
-    try:
-        cj = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-
-        # Step 1: carica la pagina HTML — ottieni cookie E page ID reale di Wicket
-        req_page = urllib.request.Request(page_url, headers={
-            **base_headers,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Upgrade-Insecure-Requests": "1",
-        })
-        with opener.open(req_page, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-
-        # Estrae il page ID di Wicket dall'HTML (es. "3-1.0-container..." → page_id = "3")
-        # Il pattern cerca il numero prima di "-1.0-" in qualsiasi URL Wicket della pagina
-        match = re.search(r'["\?&](\d+)-1\.0-[a-z]', html)
-        page_id = match.group(1) if match else "1"
-        logger.info(f"Screener — page ID: {page_id} | cookie: {[c.name for c in cj]}")
-
-        ajax_url = (
-            f"https://www.justetf.com/it/search.html?"
-            f"{page_id}-1.0-{COMP_PATH}"
-            f"&query={tema_q}&search=ALL&_wicket=1"
-        )
-
-        # Step 2: chiamata AJAX con cookie e page ID corretti
-        req_ajax = urllib.request.Request(ajax_url, headers={
-            **base_headers,
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Wicket-Ajax": "true",
-            "Wicket-Ajax-BaseURL": f"search.html?query={tema_q}&search=ALL",
-            "Referer": page_url,
-        })
-        with opener.open(req_ajax, timeout=15) as resp:
-            raw = resp.read()
-
-        if not raw:
-            logger.error("Screener JustETF: risposta vuota")
-            return []
-
-        logger.info(f"Screener risposta (primi 120 char): {raw[:120]}")
-
-        # Se JustETF risponde ancora con redirect, il page ID è ancora sbagliato
-        if b"ajax-response" in raw or b"redirect" in raw:
-            logger.error("Screener JustETF: redirect ricevuto, page ID non estratto correttamente")
-            return []
-
-        data = json.loads(raw)
-        risultati = []
-        for etf in data.get("data", [])[:6]:
-            isin_val = etf.get("isin", "")
-            name_val = etf.get("name", "")
-            if isin_val and name_val:
-                risultati.append({
-                    "name": name_val,
-                    "isin": isin_val,
-                    "ter": etf.get("ter", "n/d"),
-                    "fundSize": etf.get("fundSize", "n/d"),
-                    "yearReturn": etf.get("yearReturnCUR", "n/d"),
-                })
-
-        logger.info(f"Screener JustETF OK: {len(risultati)} ETF per tema '{tema}'")
-        return risultati
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Screener JustETF: risposta non e JSON — {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Errore screener JustETF: {e}")
-        return []
-
-
-def cerca_etf_tematici_tavily(tema: str, testo_originale: str) -> str:
-    """Fallback: cerca ETF per tema via Tavily se lo screener non risponde."""
+def cerca_etf_tematici(tema: str, testo_originale: str) -> tuple:
+    """Cerca ETF per tema via Tavily. Ritorna (dati_per_llm, link_justetf)."""
     risultati = cerca_tavily(testo_originale, ETF_SITES, max_results=5)
+    link = link_justetf_tema(tema)
     if risultati in ("NESSUN_DATO", "ERRORE_DATI"):
-        return "Nessun ETF specifico trovato. Prova a specificare meglio il tema."
-    nota = "\n\n(Non scrivere tu nessun link o indirizzo web: verra aggiunto automaticamente dopo.)"
-    return f"{risultati}{nota}"
+        return ("Nessun ETF specifico trovato per questo tema.", link)
+    nota = "\n\n(Non scrivere tu nessun link: viene aggiunto automaticamente dopo.)"
+    return (f"{risultati}{nota}", link)
 
 
 def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
@@ -391,20 +290,27 @@ def cerca_tavily(query: str, sites: list, max_results: int = 3) -> str:
 
 
 def is_domanda_prezzo(testo: str) -> bool:
-    """Capisce se la domanda riguarda il prezzo/quotazione o aspetti qualitativi."""
-    parole_prezzo = ["quota", "quotazione", "prezzo", "price", "valore", "vale", "quanto costa", "oggi"]
+    """Capisce se la domanda riguarda il prezzo o aspetti qualitativi."""
+    parole_prezzo = ["quota", "quotazione", "prezzo", "price", "valore", "vale", "quanto"]
     return any(p in testo.lower() for p in parole_prezzo)
 
 
-async def rispondi(chat_id: int, user_message: str, nome: str, context_data: str = None, testo_in_reply: str = "") -> str:
+async def rispondi(chat_id: int, user_message: str, nome: str,
+                   context_data: str = None, testo_in_reply: str = "") -> str:
     try:
         contesto_reply = ""
         if testo_in_reply:
-            contesto_reply = f"\n\n(L'utente sta rispondendo a questo messaggio precedente, usalo come contesto:\n{testo_in_reply})"
+            contesto_reply = (
+                f"\n\n(L'utente sta rispondendo a questo messaggio precedente, "
+                f"usalo come contesto:\n{testo_in_reply})"
+            )
         if context_data:
             system = SYSTEM_PROMPT_DATA
             history = get_history(chat_id, limit=3)
-            user_content = f"Domanda di {nome}: {user_message}{contesto_reply}\n\nDati disponibili:\n{context_data}"
+            user_content = (
+                f"Domanda di {nome}: {user_message}{contesto_reply}\n\n"
+                f"Dati disponibili:\n{context_data}"
+            )
         else:
             system = SYSTEM_PROMPT
             history = get_history(chat_id, limit=5)
@@ -484,28 +390,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if categoria == "AZIONE":
         nome_titolo = titolo if titolo else testo
         dato = get_prezzo_azione(nome_titolo)
-        if dato in ("NESSUN_DATO", "ERRORE_DATI"):
-            context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
-        else:
+        if dato not in ("NESSUN_DATO", "ERRORE_DATI"):
             context_data = dato
+        else:
+            # Finnhub non ha trovato nulla — prova JustETF se sembra un ISIN
+            isin_fallback = trova_isin(nome_titolo)
+            if isin_fallback:
+                logger.info(f"Finnhub fallito, provo JustETF per ISIN {isin_fallback}")
+                prezzo = prezzo_etf_justetf(isin_fallback)
+                info = leggi_pagina_justetf(isin_fallback)
+                parti = []
+                if prezzo not in ("NESSUN_DATO", "ERRORE_DATI"):
+                    parti.append("QUOTAZIONE:\n" + prezzo)
+                if info not in ("NESSUN_DATO", "ERRORE_DATI"):
+                    parti.append("INFORMAZIONI FONDO:\n" + info)
+                if parti:
+                    context_data = "\n\n".join(parti)
+                else:
+                    # JustETF non ha trovato nulla — prova Tavily come ultimo ripiego
+                    logger.info(f"JustETF fallito, provo Tavily per {isin_fallback}")
+                    tavily_result = cerca_tavily(testo, NEWS_SITES + ETF_SITES, max_results=3)
+                    if tavily_result not in ("NESSUN_DATO", "ERRORE_DATI"):
+                        context_data = (
+                            f"ATTENZIONE: non ho trovato dati strutturati per questo ISIN. "
+                            f"Quello che segue proviene da una ricerca web generica e potrebbe non essere accurato.\n\n"
+                            f"{tavily_result}"
+                        )
+                    else:
+                        context_data = f"ISIN_NON_TROVATO:{isin_fallback}"
+            else:
+                context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
     elif categoria == "ETF":
         isin = trova_isin(testo_esteso)
         if isin:
-            # ISIN trovato: prezzo + info qualitative
-            # Distingue domande sul prezzo da domande sulla composizione
+            # ISIN trovato: prezzo + info qualitative (ordine dipende dalla domanda)
             e_domanda_prezzo = is_domanda_prezzo(testo_esteso)
             prezzo = prezzo_etf_justetf(isin)
             info = leggi_pagina_justetf(isin)
             parti = []
             if e_domanda_prezzo:
-                # Mette il prezzo prima
                 if prezzo not in ("NESSUN_DATO", "ERRORE_DATI"):
                     parti.append("QUOTAZIONE:\n" + prezzo)
                 if info not in ("NESSUN_DATO", "ERRORE_DATI"):
                     parti.append("INFORMAZIONI FONDO:\n" + info)
             else:
-                # Domanda qualitativa: mette prima le info descrittive
                 if info not in ("NESSUN_DATO", "ERRORE_DATI"):
                     parti.append("INFORMAZIONI FONDO:\n" + info)
                 if prezzo not in ("NESSUN_DATO", "ERRORE_DATI"):
@@ -516,33 +445,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context_data = cerca_tavily(testo, ETF_SITES, max_results=3)
 
         elif titolo:
-            # Ricerca tematica: usa lo screener JustETF per avere gli ISIN veri
-            link = link_justetf_tema(titolo)
-            etf_list = cerca_etf_screener(titolo)
-
-            if etf_list:
-                righe = []
-                for e in etf_list:
-                    righe.append(
-                        f"- {e['name']}\n  ISIN: {e['isin']} | TER: {e['ter']} | Rendimento 1Y: {e['yearReturn']} | Dimensione: {e['fundSize']}M EUR"
-                    )
-                context_data = (
-                    f"ETF trovati per il tema '{titolo}':\n"
-                    + "\n".join(righe)
-                    + "\n\n(Non scrivere tu nessun link: viene aggiunto automaticamente dopo.)"
-                )
-                link_etf_da_aggiungere = link
-            else:
-                # Fallback su Tavily se lo screener non risponde
-                logger.info(f"Screener fallito, fallback Tavily per tema '{titolo}'")
-                context_data = cerca_etf_tematici_tavily(titolo, testo)
-                link_etf_da_aggiungere = link
+            # Ricerca tematica: Tavily su JustETF + link alla lista completa
+            context_data, link_etf_da_aggiungere = cerca_etf_tematici(titolo, testo)
 
         else:
-            # Domanda ETF vaga senza ISIN né tema
+            # Domanda vaga senza ISIN né tema
             if testo_in_reply:
-                # L'utente ha fatto reply: usa il contesto del messaggio precedente
-                context_data = f"L'utente si riferisce a questo messaggio precedente:\n{testo_in_reply}"
+                # Ha fatto reply: usa il contesto del messaggio precedente
+                context_data = (
+                    f"L'utente si riferisce a questo messaggio precedente:\n{testo_in_reply}"
+                )
             else:
                 reply_msg = "Di quale ETF parli? Dimmi il nome o il codice ISIN e ti do prezzo e dati."
                 add_to_history(chat_id, "user", f"[{nome}]: {testo}")
@@ -553,14 +465,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif categoria == "NOTIZIA":
         context_data = cerca_tavily(testo, NEWS_SITES, max_results=3)
 
+    # Caso ISIN non trovato da nessuna fonte
+    if isinstance(context_data, str) and context_data.startswith("ISIN_NON_TROVATO:"):
+        isin_missing = context_data.split(":", 1)[1]
+        reply_msg = f"Non ho trovato informazioni su {isin_missing}. Verifica che il codice sia corretto."
+        add_to_history(chat_id, "user", f"[{nome}]: {testo}")
+        add_to_history(chat_id, "assistant", reply_msg)
+        await message.reply_text(reply_msg)
+        return
+
     if context_data in ("NESSUN_DATO", "ERRORE_DATI"):
         context_data = None
 
-    reply = await rispondi(chat_id, testo, nome, context_data=context_data, testo_in_reply=testo_in_reply)
+    reply = await rispondi(
+        chat_id, testo, nome,
+        context_data=context_data,
+        testo_in_reply=testo_in_reply,
+    )
 
-    # Il link JustETF lo attacca il CODICE, non llama
+    # Il link JustETF lo attacca il codice, non llama
     if link_etf_da_aggiungere:
-        reply = f"{reply}\n\nLista completa con tutti gli ISIN su JustETF:\n{link_etf_da_aggiungere}"
+        reply = f"{reply}\n\nLista completa su JustETF:\n{link_etf_da_aggiungere}"
 
     await message.reply_text(reply, parse_mode="Markdown", disable_web_page_preview=True)
 
