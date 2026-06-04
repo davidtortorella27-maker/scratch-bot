@@ -433,7 +433,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message.reply_to_message is not None
         and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.is_bot
-        and (message.reply_to_message.from_user.username or "").lower() == "scratchfinbot"
     )
     if BOT_NAME not in testo and not is_reply_to_bot:
         return
