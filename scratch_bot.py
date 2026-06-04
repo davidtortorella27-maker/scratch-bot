@@ -188,9 +188,18 @@ def get_prezzo_azione(titolo: str) -> str:
 
 
 def trova_isin(testo: str) -> str:
-    """Cerca un codice ISIN nel testo (2 lettere + 10 caratteri alfanumerici)."""
-    match = re.search(r'\b[A-Z]{2}[A-Z0-9]{10}\b', testo.upper())
-    return match.group(0) if match else None
+    """Cerca un codice ISIN nel testo: 2 lettere + 10 caratteri alfanumerici.
+    Deve contenere almeno una cifra, cosi parole come 'INTELLIGENZA' non vengono scambiate per ISIN."""
+    for match in re.finditer(r'\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b', testo.upper()):
+        candidato = match.group(0)
+        if any(c.isdigit() for c in candidato):
+            return candidato
+    # fallback piu permissivo ma sempre con obbligo di almeno una cifra
+    for match in re.finditer(r'\b[A-Z]{2}[A-Z0-9]{10}\b', testo.upper()):
+        candidato = match.group(0)
+        if any(c.isdigit() for c in candidato):
+            return candidato
+    return None
 
 
 def prezzo_etf_justetf(isin: str) -> str:
