@@ -264,17 +264,18 @@ def link_justetf_tema(tema: str) -> str:
 def cerca_etf_screener(tema: str) -> list:
     """
     Cerca ETF per tema usando l'endpoint interno di JustETF.
-    Due step: carica la pagina per i cookie di sessione Wicket, poi chiama l'endpoint AJAX.
+    1) Carica la pagina HTML per ottenere cookie e page ID reale di Wicket.
+    2) Usa quel page ID per costruire l'URL AJAX corretto.
     Ritorna lista di dict {name, isin, ter, fundSize, yearReturn} o lista vuota.
     """
+    # Path fisso del componente Wicket (non cambia con il design della pagina)
+    COMP_PATH = (
+        "container-tabsContentContainer-tabsContentRepeater-0-container-content-"
+        "container-resultContent-etfsContainer-etfsTablePanel"
+    )
     tema_q = urllib.parse.quote_plus(tema)
     page_url = f"https://www.justetf.com/it/search.html?query={tema_q}&search=ALL"
-    ajax_url = (
-        "https://www.justetf.com/it/search.html?"
-        "1-1.0-container-tabsContentContainer-tabsContentRepeater-0-container-content-"
-        "container-resultContent-etfsContainer-etfsTablePanel"
-        f"&query={tema_q}&search=ALL&_wicket=1"
-    )
+
     base_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -284,21 +285,33 @@ def cerca_etf_screener(tema: str) -> list:
         "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
         "Connection": "keep-alive",
     }
+
     try:
         cj = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
-        # Step 1: carica la pagina principale per ottenere i cookie di sessione Wicket
+        # Step 1: carica la pagina HTML — ottieni cookie E page ID reale di Wicket
         req_page = urllib.request.Request(page_url, headers={
             **base_headers,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Upgrade-Insecure-Requests": "1",
         })
-        opener.open(req_page, timeout=15)
-        cookie_names = [c.name for c in cj]
-        logger.info(f"Screener — cookie ottenuti: {cookie_names}")
+        with opener.open(req_page, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
 
-        # Step 2: chiamata AJAX con i cookie di sessione
+        # Estrae il page ID di Wicket dall'HTML (es. "3-1.0-container..." → page_id = "3")
+        # Il pattern cerca il numero prima di "-1.0-" in qualsiasi URL Wicket della pagina
+        match = re.search(r'["\?&](\d+)-1\.0-[a-z]', html)
+        page_id = match.group(1) if match else "1"
+        logger.info(f"Screener — page ID: {page_id} | cookie: {[c.name for c in cj]}")
+
+        ajax_url = (
+            f"https://www.justetf.com/it/search.html?"
+            f"{page_id}-1.0-{COMP_PATH}"
+            f"&query={tema_q}&search=ALL&_wicket=1"
+        )
+
+        # Step 2: chiamata AJAX con cookie e page ID corretti
         req_ajax = urllib.request.Request(ajax_url, headers={
             **base_headers,
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -314,8 +327,12 @@ def cerca_etf_screener(tema: str) -> list:
             logger.error("Screener JustETF: risposta vuota")
             return []
 
-        # Log dei primi caratteri per diagnostica
-        logger.info(f"Screener risposta (primi 100 char): {raw[:100]}")
+        logger.info(f"Screener risposta (primi 120 char): {raw[:120]}")
+
+        # Se JustETF risponde ancora con redirect, il page ID è ancora sbagliato
+        if b"ajax-response" in raw or b"redirect" in raw:
+            logger.error("Screener JustETF: redirect ricevuto, page ID non estratto correttamente")
+            return []
 
         data = json.loads(raw)
         risultati = []
@@ -335,7 +352,7 @@ def cerca_etf_screener(tema: str) -> list:
         return risultati
 
     except json.JSONDecodeError as e:
-        logger.error(f"Screener JustETF: risposta non e JSON. Errore: {e}")
+        logger.error(f"Screener JustETF: risposta non e JSON — {e}")
         return []
     except Exception as e:
         logger.error(f"Errore screener JustETF: {e}")
